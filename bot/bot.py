@@ -14,6 +14,8 @@ import asyncio
 import os
 import re
 import logging
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import httpx
 from telegram import (
@@ -1378,6 +1380,23 @@ def main() -> None:
         filters.ChatType.SUPERGROUP & (filters.VOICE | filters.AUDIO),
         opinion_voice,
     ))
+
+    # Render free plan: web service uchun /health endpoint kerak
+    # Bot polling bilan parallel minimal HTTP server ishga tushiramiz
+    port = int(os.getenv("PORT", "8080"))
+
+    class HealthHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"status":"ok"}')
+        def log_message(self, format, *args):
+            pass  # HTTP loglarni o'chiramiz
+
+    health_server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    t = threading.Thread(target=health_server.serve_forever, daemon=True)
+    t.start()
+    log.info("Health server started on port %d", port)
 
     log.info("INTRA GROUP bot ishga tushdi. URL=%s", MINI_APP_URL)
     app.run_polling(allowed_updates=Update.ALL_TYPES)

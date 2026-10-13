@@ -72,22 +72,20 @@ services:
       - key: INTERNAL_API_KEY
         sync: false
 
-  # ── Telegram Bot (background worker) ──────────────────────────────────────
-  - type: worker
+  # ── Telegram Bot (web service sifatida — free plan worker qo'llab-quvvatlamaydi)
+  - type: web
     name: sphera-bot
     runtime: docker
     dockerfilePath: bot/Dockerfile
     dockerContext: bot
     plan: free
+    healthCheckPath: /health
     envVars:
       - key: BOT_TOKEN
         sync: false
       - key: ADMIN_IDS
         sync: false
-      # MINI_APP_URL = backend URL (Render deploy qilgach ma'lum bo'ladi)
       - key: MINI_APP_URL
         sync: false
-      # INTERNAL_API_URL = backend Render internal URL
-      # Format: https://sphera-backend.onrender.com
       - key: INTERNAL_API_URL
         sync: false
