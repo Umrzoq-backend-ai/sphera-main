@@ -1,15 +1,39 @@
 import os
 import time
-from typing import Optional
 
 from app.core.config import settings
 
-RADIO_PUBLIC_URL = settings.radio_public_url
 AUDIO_DIR = settings.audio_dir
+USE_MEDIAMTX = settings.use_mediamtx
 USE_ICECAST = settings.use_icecast
 
-# Icecast tunnel URL (agar alohida tunnel ochilgan bo'lsa — telefon to'g'ridan ulanadi)
-ICECAST_PUBLIC_URL = os.getenv("ICECAST_PUBLIC_URL", "").rstrip("/")
+
+def hls_stream_url(lang: str | None = None) -> str | None:
+    """HLS oqim manzili — backend'ning o'z proksisi orqali (bir xil origin).
+
+    MediaMTX'ga to'g'ridan-to'g'ri (masalan http://localhost:8888) emas,
+    backend orqali beriladi: mobil klient (Telegram Mini App) faqat backend
+    tunnel'iga ulanadi, MediaMTX alohida oshkor qilinishi shart emas
+    (bo'lmasa "localhost" klient qurilmasining o'ziga ishora qiladi).
+    """
+    if not USE_MEDIAMTX:
+        return None
+    lng = lang if lang in ("ru", "lt", "en") else "ru"
+    return f"/radio/hls/live_{lng}/index.m3u8"
+
+
+def icecast_stream_url(lang: str | None = None) -> str | None:
+    """Icecast oqim manzili — backend'ning o'z proksisi orqali (bir xil origin).
+
+    HLS'dan farqli, past kechikish uchun: uzluksiz MP3 oqim, segment/manifest
+    yo'q. Proksi (radio.py:icecast_proxy) qasddan ~6-8s kechikish qo'shadi
+    (tarmoq jitter'iga chidamlilik uchun).
+    """
+    if not USE_ICECAST:
+        return None
+    lng = lang if lang in ("ru", "lt", "en") else "ru"
+    return f"/radio/live/{lng}"
+
 
 # Amaldagi shaharlar (bazadan yuklanadi, dinamik kengayadi)
 VALID_CITIES: set[str] = set()
@@ -38,18 +62,16 @@ class CityRadioState:
     def __init__(self, city: str) -> None:
         self.city = city
         self.is_live: bool = False
-        self.broadcaster_type: Optional[str] = None
-        self.broadcaster_name: Optional[str] = None
+        self.broadcaster_type: str | None = None
+        self.broadcaster_name: str | None = None
         # Playlist: [{id, filename, script, created_at, duration_sec}]
         self.segments: list[dict] = []
 
     def stream_url(self, lang: str = None) -> str:
         if USE_ICECAST:
-            lng = lang if lang in ("ru", "lt", "en") else "ru"
-            # Har safar env'dan o'qiymiz (runtime'da o'zgarishi mumkin)
-            icecast_pub = os.getenv("ICECAST_PUBLIC_URL", "").rstrip("/")
-            base = icecast_pub or RADIO_PUBLIC_URL
-            return f"{base}/live_{lng}"
+            return icecast_stream_url(lang)
+        if USE_MEDIAMTX:
+            return hls_stream_url(lang)
         if self.segments:
             return f"/radio/audio/{self.city}/{self.segments[-1]['filename']}"
         return None
@@ -80,6 +102,7 @@ class CityRadioState:
             "broadcaster_name": self.broadcaster_name,
             "listeners_count": listeners_count,
             "stream_url": self.stream_url(),
+            "use_hls": USE_MEDIAMTX and not USE_ICECAST,
             "use_icecast": USE_ICECAST,
             "current_segment": self.segments[-1] if self.segments else None,
         }

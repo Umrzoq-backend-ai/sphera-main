@@ -10,8 +10,12 @@ Foydalanuvchi studiyaga xabar yuborishdan oldin botdan o'tadi:
 TZ §1: /profile — real telegram_id ko'rsatiladi.
 """
 
+import asyncio
 import os
+import re
 import logging
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import httpx
 from telegram import (
@@ -52,7 +56,7 @@ ADMIN_IDS = {
 }
 
 # ====== ConversationHandler states (so'rovnoma) ======
-TOPIC, DESCRIPTION, EXTRA = range(3)
+TOPIC, DESCRIPTION, EXTRA, TRANSFER_ID, TRANSFER_AMOUNT, REQUEST_ID, REQUEST_AMOUNT, REQUEST_MSG = range(8)
 
 # ====== Ko'p tilli xabarlar ======
 TEXTS = {
@@ -93,6 +97,22 @@ TEXTS = {
             "/mic <id> — Дать микрофон · /mute <id> — Забрать\n"
             "/help — Список команд"
         ),
+        "menu_buy":       "💎 Купить поинты",
+        "menu_transfer":  "💸 Перевести поинты",
+        "menu_request":   "🎁 Запросить поинты",
+        "menu_profile":   "👤 Профиль",
+        "menu_help":      "❓ Помощь",
+        "ask_transfer_id":     "💸 Введите Telegram ID получателя:",
+        "ask_transfer_amount": "Сколько поинтов отправить?",
+        "transfer_ok":         "✅ Отправлено {amount:.3f} поинтов пользователю `{id}`.\nВаш баланс: {points:.3f}",
+        "transfer_fail":       "⚠️ Не удалось отправить. Проверьте ID получателя и баланс.",
+        "ask_request_id":      "🎁 Введите Telegram ID пользователя, у которого хотите попросить поинты:",
+        "ask_request_amount":  "Сколько поинтов запросить?",
+        "ask_request_msg":     "Сообщение (необязательно, или /skip):",
+        "request_ok":          "✅ Запрос на {amount:.3f} поинтов отправлен пользователю `{id}`.",
+        "request_fail":        "⚠️ Не удалось отправить запрос. Проверьте ID.",
+        "invalid_id":          "⚠️ Неверный ID. Введите число (Telegram ID).",
+        "invalid_amount":      "⚠️ Неверная сумма. Введите положительное число.",
     },
     "en": {
         "welcome": (
@@ -131,6 +151,22 @@ TEXTS = {
             "/mic <id> — Grant mic · /mute <id> — Revoke\n"
             "/help — Commands list"
         ),
+        "menu_buy":       "💎 Buy points",
+        "menu_transfer":  "💸 Transfer points",
+        "menu_request":   "🎁 Request points",
+        "menu_profile":   "👤 Profile",
+        "menu_help":      "❓ Help",
+        "ask_transfer_id":     "💸 Enter the recipient's Telegram ID:",
+        "ask_transfer_amount": "How many points to send?",
+        "transfer_ok":         "✅ Sent {amount:.3f} points to `{id}`.\nYour balance: {points:.3f}",
+        "transfer_fail":       "⚠️ Could not send. Check the recipient's ID and your balance.",
+        "ask_request_id":      "🎁 Enter the Telegram ID of the user to request points from:",
+        "ask_request_amount":  "How many points to request?",
+        "ask_request_msg":     "Message (optional, or /skip):",
+        "request_ok":          "✅ Request for {amount:.3f} points sent to `{id}`.",
+        "request_fail":        "⚠️ Could not send the request. Check the ID.",
+        "invalid_id":          "⚠️ Invalid ID. Enter a number (Telegram ID).",
+        "invalid_amount":      "⚠️ Invalid amount. Enter a positive number.",
     },
     "lt": {
         "welcome": (
@@ -169,6 +205,22 @@ TEXTS = {
             "/mic <id> — Duoti mikrofoną · /mute <id> — Atimti\n"
             "/help — Komandų sąrašas"
         ),
+        "menu_buy":       "💎 Pirkti taškus",
+        "menu_transfer":  "💸 Pervesti taškus",
+        "menu_request":   "🎁 Prašyti taškų",
+        "menu_profile":   "👤 Profilis",
+        "menu_help":      "❓ Pagalba",
+        "ask_transfer_id":     "💸 Įveskite gavėjo Telegram ID:",
+        "ask_transfer_amount": "Kiek taškų siųsti?",
+        "transfer_ok":         "✅ Išsiųsta {amount:.3f} taškų vartotojui `{id}`.\nJūsų likutis: {points:.3f}",
+        "transfer_fail":       "⚠️ Nepavyko išsiųsti. Patikrinkite gavėjo ID ir likutį.",
+        "ask_request_id":      "🎁 Įveskite vartotojo, iš kurio norite prašyti taškų, Telegram ID:",
+        "ask_request_amount":  "Kiek taškų prašyti?",
+        "ask_request_msg":     "Žinutė (nebūtina, arba /skip):",
+        "request_ok":          "✅ Prašymas dėl {amount:.3f} taškų išsiųstas vartotojui `{id}`.",
+        "request_fail":        "⚠️ Nepavyko išsiųsti prašymo. Patikrinkite ID.",
+        "invalid_id":          "⚠️ Neteisingas ID. Įveskite skaičių (Telegram ID).",
+        "invalid_amount":      "⚠️ Neteisinga suma. Įveskite teigiamą skaičių.",
     },
 }
 
@@ -186,6 +238,24 @@ def webapp_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton("📻 Открыть радио", web_app=WebAppInfo(url=MINI_APP_URL))]]
     )
+
+
+def main_keyboard(lang: str) -> ReplyKeyboardMarkup:
+    """Doimiy pastki klaviatura — asosiy amallar (chat input yonidagi grid orqali)."""
+    return ReplyKeyboardMarkup(
+        [
+            [tx(lang, "menu_buy"), tx(lang, "menu_transfer")],
+            [tx(lang, "menu_request"), tx(lang, "menu_profile")],
+            [tx(lang, "menu_help")],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def _menu_pattern(key: str) -> str:
+    """Barcha tillardagi menyu tugmasi matnlarini bitta regexga birlashtiradi."""
+    variants = {TEXTS[l][key] for l in ("ru", "en", "lt")}
+    return "^(" + "|".join(re.escape(v) for v in variants) + ")$"
 
 
 async def _get_user_lang(telegram_id: int) -> str:
@@ -251,38 +321,31 @@ def tx(lang: str, key: str) -> str:
 # ============================================================
 # POINT SOTIB OLISH — Telegram Payments (haqiqiy pul)
 # ============================================================
-POINT_PACKAGES = [
-    {"id": 1, "points": 100,  "price": 100,  "label": "100 поинтов"},
-    {"id": 2, "points": 500,  "price": 400,  "label": "500 поинтов"},
-    {"id": 3, "points": 1500, "price": 1000, "label": "1500 поинтов"},
-    {"id": 4, "points": 5000, "price": 2500, "label": "5000 поинтов"},
-]
-# price — Telegram Stars (XTR) miqdori (XTR uchun provider token kerak emas).
+# Paketlar backend'dagi `point_packages` jadvalidan jonli olinadi (admin
+# panel orqali boshqariladi) — bu yerda hardcode YO'Q, chunki admin
+# o'zgartirgan narx/paket darhol botda ham to'g'ri ko'rinishi va
+# to'g'ri summaga hisoblanishi kerak.
+async def _fetch_packages() -> list[dict]:
+    """Faol point paketlarini backend'dan oladi (public endpoint, auth kerak emas)."""
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{INTERNAL_API_URL}/users/me/points/packages", timeout=8)
+            if resp.status_code == 200:
+                return resp.json()
+    except Exception as exc:
+        log.warning("fetch packages failed: %s", exc)
+    return []
 
 
-async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/buy — point paketlarini ko'rsatadi."""
-    lang = await _get_user_lang(update.effective_user.id)
-    title = {"ru": "💎 Купить поинты:", "en": "💎 Buy points:", "lt": "💎 Pirkti taškus:"}
-    rows = [[InlineKeyboardButton(f"{p['label']} — ⭐{p['price']}", callback_data=f"buy_{p['id']}")]
-            for p in POINT_PACKAGES]
-    await update.message.reply_text(title.get(lang, title["ru"]), reply_markup=InlineKeyboardMarkup(rows))
-
-
-async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Paket tanlandi — invoice yuboradi."""
-    query = update.callback_query
-    await query.answer()
-    pkg_id = int(query.data.split("_")[1])
-    pkg = next((p for p in POINT_PACKAGES if p["id"] == pkg_id), None)
-    if not pkg:
-        return
-    prices = [LabeledPrice(label=pkg["label"], amount=pkg["price"])]
+async def _send_invoice(context: ContextTypes.DEFAULT_TYPE, chat_id: int, pkg: dict) -> None:
+    """Bitta paket uchun Stars invoyce yuboradi (price_stars — Telegram Stars/XTR
+    miqdori, XTR uchun provider token kerak emas)."""
+    prices = [LabeledPrice(label=pkg["label"], amount=pkg["price_stars"])]
     try:
         await context.bot.send_invoice(
-            chat_id=query.message.chat_id,
+            chat_id=chat_id,
             title=f"Radio AI — {pkg['label']}",
-            description=f"Пополнение баланса на {pkg['points']} поинтов",
+            description=f"Пополнение баланса на {pkg['points_amount']} поинтов",
             payload=f"pkg_{pkg['id']}",
             provider_token=PAYMENT_PROVIDER_TOKEN,
             currency=PAYMENT_CURRENCY,
@@ -290,7 +353,123 @@ async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
     except Exception as exc:
         log.error("send_invoice failed: %s", exc)
-        await query.message.reply_text("⚠️ To'lov tizimi hozircha sozlanmagan.")
+        await context.bot.send_message(chat_id, "⚠️ To'lov tizimi hozircha sozlanmagan.")
+
+
+async def _show_slot(update: Update, context: ContextTypes.DEFAULT_TYPE, slot_ref: str) -> None:
+    """Slot ma'lumotini ko'rsatadi (deep-link orqali)."""
+    user = update.effective_user
+    lang = await _get_user_lang(user.id)
+    try:
+        slot_id = int(slot_ref.split("_")[1])
+        token = await _get_user_token(user.id, user.username, user.full_name)
+        if not token:
+            await update.message.reply_text("⚠️ Profil yuklanmadi.")
+            return
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"{INTERNAL_API_URL}/slots/{slot_id}",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=10,
+            )
+            if resp.status_code != 200:
+                await update.message.reply_text("❌ Slot topilmadi.")
+                return
+            s = resp.json()
+    except Exception as exc:
+        log.warning("slot fetch failed: %s", exc)
+        await update.message.reply_text("⚠️ Xatolik.")
+        return
+
+    host = s.get("display_name") or s.get("username") or "Ведущий"
+    live_label = {"ru": "🔴 СЕЙЧАС В ЭФИРЕ", "en": "🔴 LIVE NOW", "lt": "🔴 DABAR ETERYJE"}
+    soon_label = {"ru": "⏳ Скоро", "en": "⏳ Soon", "lt": "⏳ Netrukus"}
+    sched_label = {"ru": "📅 Запланирован", "en": "📅 Scheduled", "lt": "📅 Suplanuota"}
+
+    status_txt = (
+        live_label.get(lang, live_label["ru"]) if s.get("is_live_now") else
+        soon_label.get(lang, soon_label["ru"]) if s.get("is_soon") else
+        sched_label.get(lang, sched_label["ru"])
+    )
+    countdown = s.get("countdown_sec", 0)
+    h, m = countdown // 3600, (countdown % 3600) // 60
+
+    text = (
+        f"🎙 *{s['title']}*\n\n"
+        f"{status_txt}\n"
+        f"📻 {host}\n"
+        f"⏱ {s.get('duration_min', 60)} мин\n"
+    )
+    if s.get("description"):
+        text += f"\n{s['description']}\n"
+    if countdown > 0:
+        text += f"\n⏳ Через {h}ч {m}м\n"
+
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=webapp_keyboard())
+
+
+async def _show_live(update: Update, context: ContextTypes.DEFAULT_TYPE, live_ref: str) -> None:
+    """Jonli efir deep-link'i (EfirScreen dashboard'idagi "Копировать
+    ссылку" bilan yaratilgan) — auth talab qilmaydi, efir holati ochiq
+    ma'lumot."""
+    lang = await _get_user_lang(update.effective_user.id)
+    token = live_ref[len("live_"):]
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{INTERNAL_API_URL}/radio/live-by-token/{token}", timeout=10)
+            data = resp.json() if resp.status_code == 200 else {"live": False}
+    except Exception as exc:
+        log.warning("live-by-token fetch failed: %s", exc)
+        data = {"live": False}
+
+    if data.get("live"):
+        host = data.get("broadcaster_name") or "Ведущий"
+        listeners = data.get("listeners_count", 0)
+        live_text = {
+            "ru": f"🔴 *Сейчас в эфире*\n\n📻 {host}\n🎧 {listeners} слушателей",
+            "en": f"🔴 *Live now*\n\n📻 {host}\n🎧 {listeners} listeners",
+            "lt": f"🔴 *Dabar eteryje*\n\n📻 {host}\n🎧 {listeners} klausytojų",
+        }
+        text = live_text.get(lang, live_text["ru"])
+    else:
+        ended_text = {
+            "ru": "📻 Этот эфир уже завершён — но заходи послушать следующий!",
+            "en": "📻 That broadcast has ended — but come listen to the next one!",
+            "lt": "📻 Šis eteris jau baigėsi — bet ateik pasiklausyti kito!",
+        }
+        text = ended_text.get(lang, ended_text["ru"])
+
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=webapp_keyboard())
+
+
+async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/buy — point paketlarini ko'rsatadi."""
+    lang = await _get_user_lang(update.effective_user.id)
+    packages = await _fetch_packages()
+    if not packages:
+        unavailable = {"ru": "⚠️ Пакеты временно недоступны, попробуйте позже.",
+                        "en": "⚠️ Packages temporarily unavailable, try again later.",
+                        "lt": "⚠️ Paketai laikinai nepasiekiami, bandykite vėliau."}
+        await update.message.reply_text(unavailable.get(lang, unavailable["ru"]))
+        return
+    title = {"ru": "💎 Купить поинты:", "en": "💎 Buy points:", "lt": "💎 Pirkti taškus:"}
+    rows = [[InlineKeyboardButton(f"{p['label']} — ⭐{p['price_stars']}", callback_data=f"buy_{p['id']}")]
+            for p in packages]
+    await update.message.reply_text(title.get(lang, title["ru"]), reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Paket tanlandi — invoice yuboradi. Har doim eng so'nggi narxni backend'dan
+    qayta o'qiydi (ro'yxat ko'rsatilgandan keyin admin narxni o'zgartirgan bo'lishi
+    mumkin — to'lov summasi har doim bazadagi joriy narxga mos kelishi kerak)."""
+    query = update.callback_query
+    await query.answer()
+    pkg_id = int(query.data.split("_")[1])
+    packages = await _fetch_packages()
+    pkg = next((p for p in packages if p["id"] == pkg_id), None)
+    if not pkg:
+        return
+    await _send_invoice(context, query.message.chat_id, pkg)
 
 
 async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -336,14 +515,47 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # /start
 # ============================================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Shu foydalanuvchining chat-menyu tugmasini ham alohida qayta
+    # tasdiqlaymiz — /start odatda Mini App yopilgandan keyin foydalanuvchi
+    # eng ko'p qaytadigan joy, global default esa ayrim chatlarda
+    # ko'rinmay qolishi mumkin (yuqoridagi izohga qarang).
+    try:
+        await context.bot.set_chat_menu_button(chat_id=update.effective_chat.id, menu_button=_menu_button())
+    except Exception:
+        pass
     # Deep-link: /start buy → to'lov paketlarini ko'rsatamiz
     if context.args and context.args[0] == "buy":
         await buy_cmd(update, context)
         return
+    # Deep-link: /start buy_N → aniq bitta paket uchun to'g'ridan-to'g'ri
+    # invoyce (mini app'dagi paket qatoriga bosilganda) — topilmasa/faol
+    # bo'lmasa oddiy paketlar ro'yxatiga tushamiz.
+    if context.args and context.args[0].startswith("buy_"):
+        try:
+            pkg_id = int(context.args[0].split("_")[1])
+        except (IndexError, ValueError):
+            pkg_id = None
+        pkg = None
+        if pkg_id is not None:
+            packages = await _fetch_packages()
+            pkg = next((p for p in packages if p["id"] == pkg_id), None)
+        if pkg:
+            await _send_invoice(context, update.effective_chat.id, pkg)
+        else:
+            await buy_cmd(update, context)
+        return
+    # Deep-link: /start slot_N → efir slot ma'lumoti
+    if context.args and context.args[0].startswith("slot_"):
+        await _show_slot(update, context, context.args[0])
+        return
+    # Deep-link: /start live_XXXXX → jonli efir dashboard'idagi "Копировать ссылку"
+    if context.args and context.args[0].startswith("live_"):
+        await _show_live(update, context, context.args[0])
+        return
     lang = await _get_user_lang(update.effective_user.id)
     await update.message.reply_text(
         tx(lang, "welcome"),
-        reply_markup=webapp_keyboard(),
+        reply_markup=main_keyboard(lang),
         parse_mode="Markdown",
     )
 
@@ -458,8 +670,13 @@ async def studio_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.post(
-                f"{INTERNAL_API_URL}/messages/text",
-                json={"city": "global", "text": full_text, "lang": lang},
+                f"{INTERNAL_API_URL}/opinions/save",
+                json={
+                    "kind": "text",
+                    "text": full_text,
+                    "tg_message_id": query.message.message_id if query.message else 0,
+                    "cost": 0.001,
+                },
                 headers={"Authorization": f"Bearer {token}"},
                 timeout=15,
             )
@@ -492,6 +709,157 @@ async def cancel_studio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     )
     context.user_data.clear()
     return ConversationHandler.END
+
+
+async def cancel_menu_flow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """/cancel — transfer/request oqimini to'xtatadi, asosiy menyuni qaytaradi."""
+    lang = context.user_data.get("lang") or await _get_user_lang(update.effective_user.id)
+    await update.message.reply_text(
+        tx(lang, "cancelled"),
+        reply_markup=main_keyboard(lang),
+    )
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+# ============================================================
+# 💸 Перевести поинты — ConversationHandler: ID → summa → yuborish
+# ============================================================
+async def transfer_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    lang = await _get_user_lang(update.effective_user.id)
+    context.user_data["lang"] = lang
+    await update.message.reply_text(tx(lang, "ask_transfer_id"), reply_markup=ReplyKeyboardRemove())
+    return TRANSFER_ID
+
+
+async def transfer_got_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    lang = context.user_data.get("lang", "ru")
+    text = update.message.text.strip()
+    if not text.isdigit():
+        await update.message.reply_text(tx(lang, "invalid_id"))
+        return TRANSFER_ID
+    context.user_data["target_id"] = int(text)
+    await update.message.reply_text(tx(lang, "ask_transfer_amount"))
+    return TRANSFER_AMOUNT
+
+
+async def transfer_got_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    lang = context.user_data.get("lang", "ru")
+    try:
+        amount = float(update.message.text.strip().replace(",", "."))
+        if amount <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text(tx(lang, "invalid_amount"))
+        return TRANSFER_AMOUNT
+
+    user = update.effective_user
+    target_id = context.user_data.get("target_id")
+    token = await _get_user_token(user.id, user.username, user.full_name)
+
+    if token:
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    f"{INTERNAL_API_URL}/users/me/points/transfer",
+                    json={"to_user_id": target_id, "amount": amount},
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=10,
+                )
+            if resp.status_code == 200:
+                pts = resp.json().get("detail", {}).get("points", 0)
+                await update.message.reply_text(
+                    tx(lang, "transfer_ok").format(amount=amount, id=target_id, points=float(pts)),
+                    reply_markup=main_keyboard(lang),
+                    parse_mode="Markdown",
+                )
+            else:
+                await update.message.reply_text(tx(lang, "transfer_fail"), reply_markup=main_keyboard(lang))
+        except Exception as exc:
+            log.warning("transfer failed: %s", exc)
+            await update.message.reply_text(tx(lang, "transfer_fail"), reply_markup=main_keyboard(lang))
+    else:
+        await update.message.reply_text(tx(lang, "transfer_fail"), reply_markup=main_keyboard(lang))
+
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+# ============================================================
+# 🎁 Запросить поинты — ConversationHandler: ID → summa → xabar → yuborish
+# ============================================================
+async def request_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    lang = await _get_user_lang(update.effective_user.id)
+    context.user_data["lang"] = lang
+    await update.message.reply_text(tx(lang, "ask_request_id"), reply_markup=ReplyKeyboardRemove())
+    return REQUEST_ID
+
+
+async def request_got_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    lang = context.user_data.get("lang", "ru")
+    text = update.message.text.strip()
+    if not text.isdigit():
+        await update.message.reply_text(tx(lang, "invalid_id"))
+        return REQUEST_ID
+    context.user_data["target_id"] = int(text)
+    await update.message.reply_text(tx(lang, "ask_request_amount"))
+    return REQUEST_AMOUNT
+
+
+async def request_got_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    lang = context.user_data.get("lang", "ru")
+    try:
+        amount = float(update.message.text.strip().replace(",", "."))
+        if amount <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text(tx(lang, "invalid_amount"))
+        return REQUEST_AMOUNT
+    context.user_data["amount"] = amount
+    await update.message.reply_text(tx(lang, "ask_request_msg"))
+    return REQUEST_MSG
+
+
+async def _finish_request(update: Update, context: ContextTypes.DEFAULT_TYPE, message: str) -> int:
+    lang = context.user_data.get("lang", "ru")
+    user = update.effective_user
+    target_id = context.user_data.get("target_id")
+    amount = context.user_data.get("amount")
+    token = await _get_user_token(user.id, user.username, user.full_name)
+
+    if token:
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    f"{INTERNAL_API_URL}/users/me/points/request",
+                    json={"from_user_id": target_id, "amount": amount, "message": message},
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=10,
+                )
+            if resp.status_code == 200:
+                await update.message.reply_text(
+                    tx(lang, "request_ok").format(amount=amount, id=target_id),
+                    reply_markup=main_keyboard(lang),
+                    parse_mode="Markdown",
+                )
+            else:
+                await update.message.reply_text(tx(lang, "request_fail"), reply_markup=main_keyboard(lang))
+        except Exception as exc:
+            log.warning("points request failed: %s", exc)
+            await update.message.reply_text(tx(lang, "request_fail"), reply_markup=main_keyboard(lang))
+    else:
+        await update.message.reply_text(tx(lang, "request_fail"), reply_markup=main_keyboard(lang))
+
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def request_got_msg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    return await _finish_request(update, context, update.message.text.strip())
+
+
+async def request_skip_msg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    return await _finish_request(update, context, "")
 
 
 # ============================================================
@@ -880,16 +1248,36 @@ async def mute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # ============================================================
 # Bot ishga tushirish
 # ============================================================
+def _menu_button() -> MenuButtonWebApp:
+    return MenuButtonWebApp(text="📻 Radio", web_app=WebAppInfo(url=MINI_APP_URL))
+
+
+async def _keep_menu_button_fresh(bot) -> None:
+    """Global menyu tugmasini davriy ravishda qayta tasdiqlaydi.
+
+    Kuzatilgan muammo: Mini App ochib-yopilgandan keyin ba'zi
+    foydalanuvchilarda "📻 Radio" tugmasi Telegram'ning oddiy "☰ Menu"
+    holatiga qaytib qolyapti (aniq sababi Telegram klient-tarafida,
+    reproduksiya qilib bo'lmaydi). Bitta marotaba _post_init'da o'rnatish
+    yetarli emas edi — shu sabab process umri davomida davriy ravishda
+    qayta tasdiqlab turamiz, shunda uzoq muddat noto'g'ri holatda
+    qolib ketmaydi.
+    """
+    while True:
+        await asyncio.sleep(1800)  # 30 daqiqada bir
+        try:
+            await bot.set_chat_menu_button(menu_button=_menu_button())
+        except Exception as exc:
+            log.warning("periodic menu button refresh failed: %s", exc)
+
+
 async def _post_init(application: Application) -> None:
     try:
-        await application.bot.set_chat_menu_button(
-            menu_button=MenuButtonWebApp(
-                text="📻 Radio", web_app=WebAppInfo(url=MINI_APP_URL)
-            )
-        )
+        await application.bot.set_chat_menu_button(menu_button=_menu_button())
         log.info("Menu button WebApp: %s", MINI_APP_URL)
     except Exception as exc:
         log.warning("menu button failed: %s", exc)
+    asyncio.create_task(_keep_menu_button_fresh(application.bot))
 
 
 def main() -> None:
@@ -929,8 +1317,36 @@ def main() -> None:
         per_chat=True,
     )
 
+    # Doimiy pastki menyu — 💸 Перевести / 🎁 Запросить поинты
+    transfer_conv = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex(_menu_pattern("menu_transfer")), transfer_start)],
+        states={
+            TRANSFER_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, transfer_got_id)],
+            TRANSFER_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, transfer_got_amount)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_menu_flow)],
+        per_user=True,
+        per_chat=True,
+    )
+    request_conv = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex(_menu_pattern("menu_request")), request_start)],
+        states={
+            REQUEST_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, request_got_id)],
+            REQUEST_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, request_got_amount)],
+            REQUEST_MSG: [
+                CommandHandler("skip", request_skip_msg),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, request_got_msg),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_menu_flow)],
+        per_user=True,
+        per_chat=True,
+    )
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(studio_conv)
+    app.add_handler(transfer_conv)
+    app.add_handler(request_conv)
     app.add_handler(CallbackQueryHandler(studio_callback, pattern="^studio_"))
     app.add_handler(CommandHandler("radio", radio))
     app.add_handler(CommandHandler("topic", topic_cmd))
@@ -938,6 +1354,11 @@ def main() -> None:
     app.add_handler(CommandHandler("profile", profile))
     app.add_handler(CommandHandler("admin", admin_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
+
+    # Doimiy pastki menyu tugmalari (chat input yonidagi grid orqali ochiladi)
+    app.add_handler(MessageHandler(filters.Regex(_menu_pattern("menu_buy")), buy_cmd))
+    app.add_handler(MessageHandler(filters.Regex(_menu_pattern("menu_profile")), profile))
+    app.add_handler(MessageHandler(filters.Regex(_menu_pattern("menu_help")), help_cmd))
 
     # ── Voice Chat boshqaruvi (modarator/admin) — Boss talabi ──
     app.add_handler(CommandHandler("efir", efir_cmd))
@@ -959,6 +1380,23 @@ def main() -> None:
         filters.ChatType.SUPERGROUP & (filters.VOICE | filters.AUDIO),
         opinion_voice,
     ))
+
+    # Render free plan: web service uchun /health endpoint kerak
+    # Bot polling bilan parallel minimal HTTP server ishga tushiramiz
+    port = int(os.getenv("PORT", "8080"))
+
+    class HealthHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"status":"ok"}')
+        def log_message(self, format, *args):
+            pass  # HTTP loglarni o'chiramiz
+
+    health_server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    t = threading.Thread(target=health_server.serve_forever, daemon=True)
+    t.start()
+    log.info("Health server started on port %d", port)
 
     log.info("INTRA GROUP bot ishga tushdi. URL=%s", MINI_APP_URL)
     app.run_polling(allowed_updates=Update.ALL_TYPES)

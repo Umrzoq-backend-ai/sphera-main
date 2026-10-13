@@ -1,0 +1,76 @@
+# MediaMTX konfiguratsiyasi — Icecast o'rniga (RTMP ingest, HLS delivery).
+# Docker Compose ham, lokal binary (`mediamtx mediamtx.yml`) ham, Railway ham
+# shu faylni ishlatadi.
+#
+# Yetkazish HLS orqali (WebRTC emas): Railway kabi PaaS'larda ommaviy UDP yo'q,
+# WebRTC uchun kerak bo'ladigan ICE-over-TCP esa MediaMTX'da tashqi portni
+# qayta belgilab bo'lmaydi (Railway TCP Proxy portni doim tasodifiy qiladi) —
+# shuning uchun HLS (oddiy HTTP, Icecast'dagidek Railway HTTP proxy orqali
+# ishlaydi) tanlandi.
+
+logLevel: info
+
+# ---------- RTMP ingest (ffmpeg push: continuous.py / broadcast.py) ----------
+rtmp: true
+rtmpAddress: :1935
+
+# Manba autentifikatsiyasi — Icecast'dagi source-password'ga o'xshash.
+# MUHIM: MediaMTX ${VAR} syntaxni mediamtx.yml ICHIDA substitutsiya QILMAYDI,
+# MTX_AUTHINTERNALUSERS_0_PASS kabi positional env-override esa YAML'dagi
+# ro'yxatni emas, MediaMTX'ning ICHKI DEFAULT ro'yxatini (0-user = "any")
+# o'zgartiradi — shu sabab bu yerda literal qiymat ishlatiladi (Icecast
+# eski icecast.xml'da ham xuddi shunday committed edi).
+# Backend'dagi MEDIAMTX_PUBLISH_PASS bilan bir xil qiymat bo'lishi kerak.
+authMethod: internal
+authInternalUsers:
+  - user: publisher
+    pass: MediaMTXPass2025!
+    ips: []
+    permissions:
+      - action: publish
+        path:
+      - action: read
+        path:
+  - user: any
+    pass:
+    ips: []
+    permissions:
+      - action: read
+        path:
+      - action: playback
+        path:
+
+# ---------- HLS delivery (tinglovchilar to'g'ridan ulanadi) ----------
+hls: true
+hlsAddress: :8888
+# Mini-app domeni hali beqaror (Cloudflare Quick Tunnel / Railway) — doimiy
+# domen bo'lgach toraytiring.
+hlsAllowOrigins: ["*"]
+# MUHIM: MediaMTX har bir HLS o'qish sessiyasini so'rov IP'iga "pin" qiladi
+# (index.m3u8 sessiya ochadi → keyingi main_stream.m3u8/.ts so'rovlarida IP
+# mos kelishi kerak, aks holda "authentication error" 401). Railway edge
+# konteynerga faqat 100.64.0.0/10'dan emas, balki bir nechta rotatsiyalanuvchi
+# edge-IP'lardan ham ulanadi (aniqlandi: 100.64.x.x va turli 152.233.x.x —
+# so'rovdan so'rovga farq qiladi), shu sabab faqat shu diapazonni ishonchli
+# deb belgilash yetarli emas edi. HLS oqimi baribir hammaga ochiq (auth "any"
+# user'ga read ruxsat beradi) — shu sabab IP-pinning uchun barcha proxy'larga
+# ishonib, X-Forwarded-For'dagi eng chap (asl) IP'ni olamiz.
+hlsTrustedProxies: ["0.0.0.0/0", "::/0"]
+# mpegts — maksimal moslik (lowLatency HTTPS talab qiladi, Railway edge'da
+# TLS allaqachon terminatsiya qilinadi, konteyner ichida sertifikat kerak emas).
+hlsVariant: mpegts
+# Har doim generatsiya qilinadi — birinchi tinglovchi kutmasin
+# (efir baribir 24/7 uzluksiz, continuous.py orqali).
+hlsAlwaysRemux: true
+hlsSegmentCount: 5
+hlsSegmentDuration: 2s
+
+# WebRTC/RTSP/SRT kerak emas — o'chiramiz.
+webrtc: false
+rtsp: false
+srt: false
+
+# Aniq mountpoint'lar shart emas — Icecast'dagi kabi istalgan path'ga push qilsa bo'ladi
+# (masalan /live_ru, /live_lt, /live_en, yoki broadcast.py'dagi /{city}).
+paths:
+  all_others:

@@ -1,47 +1,53 @@
 import { useState, useRef } from 'react';
-import { Mic, Send, MessageSquare, Paperclip, X } from 'lucide-react';
-import { sendVoiceMessage, uploadFile } from '../../lib/api';
+import { Mic, Send, Paperclip } from 'lucide-react';
+import { uploadFile } from '../../lib/api';
 import { useTranslation } from '../../hooks/useTranslation';
-import type { Language } from '../../types';
+import { hapticImpact } from '../../lib/telegram';
 
 interface ChatInputProps {
   onSendMessage: (message: string, destination: 'chat' | 'studio') => void;
+  // Yozib bo'lingan ovoz shu callback'ga uzatiladi — yuborish, optimistik
+  // ko'rsatish va status (bitta/ikkita galochka) hammasi chaqiruvchi
+  // ekranda (ChatScreen/RoomChatModal) boshqariladi, xuddi matn kabi.
+  onSendVoice: (blob: Blob) => void;
   onToast: (message: string) => void;
   city: string;
-  language: Language;
-  onPointsUpdate: (points: number) => void;
+  // O'zi hozir prямой эфирда bo'lsa — mikrofon band (broadcast uchun
+  // ishlatilyapti), shuning uchun ovozli xabar yozib bo'lmaydi. Matn
+  // yuborish esa bunga bog'liq emas, davom etaveradi.
+  micDisabled?: boolean;
 }
 
-export function ChatInput({ onSendMessage, onToast, city, language, onPointsUpdate }: ChatInputProps) {
+// Bu input faqat CHAT'ga yuborish uchun — studiyaga yuborish Efir ekranida
+// alohida joylashgan. Tugma Telegram uslubida: matn bo'lsa yuborish
+// belgisi, bo'lmasa mikrofon — bitta doira tugma, matn maydonidan tashqarida.
+export function ChatInput({ onSendMessage, onSendVoice, onToast, city, micDisabled }: ChatInputProps) {
   const { t } = useTranslation();
   const [text, setText] = useState('');
   const [isRecording, setIsRecording] = useState(false);
-  const [pendingVoice, setPendingVoice] = useState<Blob | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const handleSend = (destination: 'chat' | 'studio') => {
-    if (pendingVoice) {
-      sendVoice(destination);
-      return;
-    }
-
+  const handleSendText = () => {
     const message = text.trim();
-    if (!message) {
-      onToast(t('toast_short'));
-      return;
-    }
-
-    onSendMessage(message, destination);
+    if (!message) return;
+    onSendMessage(message, 'chat');
     setText('');
-    onToast(destination === 'studio' ? t('toast_sent_studio') : t('toast_sent_chat'));
   };
 
   const toggleRecording = async () => {
     if (isRecording) {
+      // To'xtatish — ovoz darhol yuboriladi (Telegram kabi, oraliq
+      // tasdiqlashsiz: mediaRecorder.onstop ichida onSendVoice chaqiriladi).
+      hapticImpact('medium');
       mediaRecorderRef.current?.stop();
       setIsRecording(false);
+      return;
+    }
+
+    if (micDisabled) {
+      onToast(t('toast_mic_live'));
       return;
     }
 
@@ -73,40 +79,15 @@ export function ChatInput({ onSendMessage, onToast, city, language, onPointsUpda
           onToast(t('toast_short'));
           return;
         }
-        setPendingVoice(blob);
-        onToast(t('voice_ready'));
+        onSendVoice(blob);
       };
 
       mediaRecorder.start();
       setIsRecording(true);
-      onToast(t('toast_recording'));
+      hapticImpact('light');
     } catch (e) {
       console.error('Mic error:', e);
       onToast(t('toast_mic_denied'));
-    }
-  };
-
-  const sendVoice = async (destination: 'chat' | 'studio') => {
-    if (!pendingVoice) return;
-    onToast(t('toast_processing'));
-
-    try {
-      await sendVoiceMessage(city, pendingVoice, destination, language);
-      onToast(destination === 'studio' ? t('toast_sent_studio') : t('toast_sent_chat'));
-    } catch (error: any) {
-      if (error.status === 403) {
-        onToast(t('studio_denied_role'));
-      } else if (error.status === 402) {
-        const data = await error.response?.json().catch(() => ({}));
-        if (data?.detail?.points !== undefined) {
-          onPointsUpdate(data.detail.points);
-        }
-        onToast(t('toast_limit'));
-      } else {
-        onToast(t('send_error'));
-      }
-    } finally {
-      setPendingVoice(null);
     }
   };
 
@@ -117,10 +98,8 @@ export function ChatInput({ onSendMessage, onToast, city, language, onPointsUpda
       onToast('⚠️ Max 20MB');
       return;
     }
-    onToast(t('toast_processing'));
     try {
       await uploadFile(city, file);
-      onToast(t('toast_sent_chat'));
     } catch (error: any) {
       if (error.status === 402) {
         onToast(t('toast_limit'));
@@ -132,71 +111,68 @@ export function ChatInput({ onSendMessage, onToast, city, language, onPointsUpda
     }
   };
 
-  return (
-    <div className="flex flex-col gap-3">
-      {/* Voice preview banner */}
-      {pendingVoice && (
-        <div className="glass px-4 py-3 rounded-2xl flex items-center justify-between border border-dashed border-[#38e1ff]">
-          <span className="text-xs text-[#38e1ff]">{t('voice_ready')}</span>
-          <button onClick={() => setPendingVoice(null)} className="text-[#6b7c9e] hover:text-white transition-colors">
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-      )}
+  const hasText = text.trim().length > 0;
 
-      {/* Text input row */}
-      <div className="glass rounded-2xl px-3 py-2 flex items-center gap-2">
-        {/* Attach */}
+  const handleActionClick = () => {
+    if (isRecording || hasText) {
+      isRecording ? toggleRecording() : handleSendText();
+    } else {
+      toggleRecording();
+    }
+  };
+
+  return (
+    <div className="flex items-center gap-2">
+      {/* Text input row — Telegram uslubida pill */}
+      <div className="flex-1 glass rounded-full px-3 py-2 flex items-center gap-2 min-w-0">
         <button
           onClick={() => fileInputRef.current?.click()}
-          className="w-9 h-9 rounded-xl flex items-center justify-center text-[#6b7c9e] hover:text-[#38e1ff] hover:bg-[rgba(56,225,255,0.08)] transition-all"
+          className="w-8 h-8 shrink-0 rounded-full flex items-center justify-center text-[var(--muted)] hover:text-[var(--accent)] hover:bg-[rgba(255,47,208,0.08)] transition-all"
         >
           <Paperclip className="w-4.5 h-4.5" strokeWidth={1.8} />
         </button>
         <input ref={fileInputRef} type="file" accept="image/*,audio/*,video/*,.pdf,.doc,.docx,.txt" onChange={handleFileSelect} className="hidden" />
 
-        {/* Text field */}
         <input
           type="text"
           value={text}
           onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && handleSend('chat')}
+          onKeyDown={(e) => e.key === 'Enter' && handleSendText()}
           placeholder={t('chat_placeholder')}
-          className="flex-1 min-w-0 bg-transparent text-sm text-[#dbe9ff] placeholder-[#4a5568] outline-none"
+          disabled={isRecording}
+          className="flex-1 min-w-0 bg-transparent text-sm text-[var(--text)] placeholder-[#9a9791] outline-none disabled:opacity-50"
         />
-
-        {/* Mic */}
-        <button
-          onClick={toggleRecording}
-          className={`w-9 h-9 rounded-xl flex items-center justify-center transition-all ${
-            isRecording
-              ? 'bg-[#ff4d6d] text-white animate-pulse'
-              : 'text-[#6b7c9e] hover:text-[#38e1ff] hover:bg-[rgba(56,225,255,0.08)]'
-          }`}
-        >
-          <Mic className="w-4.5 h-4.5" strokeWidth={1.8} />
-        </button>
       </div>
 
-      {/* Send buttons */}
-      <div className="grid grid-cols-2 gap-2.5">
+      {/* Doira tugma — Telegram kabi: matn bo'lsa yuborish, bo'lmasa mikrofon.
+          Yozib turganda qizil rangga o'zgaradi, tashqi halqa animate-ping bilan
+          urib turadi (button'ning o'zi/ikonkasi hech qachon xira bo'lmaydi). */}
+      <div className="relative shrink-0">
+        {isRecording && (
+          <span className="rift-rec-pulse absolute inset-0 rounded-full bg-[var(--danger)] opacity-60" />
+        )}
         <button
-          onClick={() => handleSend('chat')}
-          className="glass py-3 px-4 rounded-2xl flex items-center justify-center gap-2 hover:border-[rgba(56,225,255,0.3)] transition-all active:scale-[0.97]"
-        >
-          <MessageSquare className="w-4 h-4 text-[#38e1ff]" strokeWidth={1.8} />
-          <span className="text-xs font-semibold text-[#dbe9ff]">{t('send_to_chat')}</span>
-        </button>
-        <button
-          onClick={() => handleSend('studio')}
-          className="py-3 px-4 rounded-2xl flex items-center justify-center gap-2 transition-all active:scale-[0.97]"
+          onClick={handleActionClick}
+          aria-label={isRecording ? 'Остановить и отправить' : hasText ? 'Отправить' : 'Записать голосовое'}
+          className="relative w-11 h-11 rounded-full flex items-center justify-center transition-all active:scale-90"
           style={{
-            background: 'linear-gradient(135deg, rgba(46,168,255,0.9), rgba(56,225,255,0.9))',
-            boxShadow: '0 0 20px rgba(56,225,255,0.3)',
+            background: isRecording
+              ? '#ff3b5c'
+              : micDisabled && !hasText
+                ? 'rgba(237,234,227,0.15)'
+                : 'linear-gradient(135deg, #ff6ee0, #FF2FD0)',
+            boxShadow: isRecording
+              ? '0 0 18px rgba(255,59,92,0.6)'
+              : micDisabled && !hasText
+                ? 'none'
+                : '0 0 16px rgba(255,47,208,0.4)',
           }}
         >
-          <Send className="w-4 h-4 text-[#060a14]" strokeWidth={2} />
-          <span className="text-xs font-bold text-[#060a14]">{t('send_to_studio')}</span>
+          {hasText && !isRecording ? (
+            <Send className="w-4.5 h-4.5 text-white ml-[-1px]" strokeWidth={2} fill="white" />
+          ) : (
+            <Mic className={`w-5 h-5 ${micDisabled ? 'text-[#9a9791]' : 'text-white'}`} strokeWidth={2} />
+          )}
         </button>
       </div>
     </div>

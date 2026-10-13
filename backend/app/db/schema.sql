@@ -63,6 +63,26 @@ CREATE TABLE IF NOT EXISTS news (
 
 CREATE INDEX IF NOT EXISTS idx_news_lang ON news(language, is_active, sort_order);
 
+-- point_packages'da bo'lgan xuddi shu xato: pastdagi seed INSERT
+-- unique constraint'siz `ON CONFLICT DO NOTHING` bilan yozilgan edi — bu
+-- hech narsani ushlamaydi, shuning uchun har server restart'ida
+-- (= har Railway deploy'ida) bir xil 6 ta yangilik qayta qo'shilib
+-- kelgan (414 qatorgacha yetgan). Avval dublikatlarni tozalab, keyin
+-- haqiqiy unique constraint qo'yamiz — shundan keyin reseed idempotent.
+DELETE FROM news a USING news b
+WHERE a.id > b.id
+  AND a.language = b.language
+  AND a.title = b.title;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'news_language_title_key'
+    ) THEN
+        ALTER TABLE news ADD CONSTRAINT news_language_title_key UNIQUE (language, title);
+    END IF;
+END $$;
+
 -- ============ Chat xabarlari ============
 CREATE TABLE IF NOT EXISTS chat_messages (
     id              SERIAL PRIMARY KEY,
@@ -74,6 +94,40 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 );
 
 CREATE INDEX IF NOT EXISTS idx_chat_messages_created ON chat_messages(created_at DESC);
+
+-- ============ Guruhlar (ведущий/admin yaratadi — TZ: "ведущий имел возможность создавать группы") ============
+CREATE TABLE IF NOT EXISTS chat_rooms (
+    id              SERIAL PRIMARY KEY,
+    title           VARCHAR(100) NOT NULL,
+    description     TEXT DEFAULT '',
+    host_user_id    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    is_active       BOOLEAN DEFAULT true,
+    created_at      TIMESTAMP DEFAULT NOW()
+);
+
+-- Guruh xabarlari xuddi shu chat_messages jadvalida saqlanadi — room_id
+-- NULL bo'lsa umumiy chat, aks holda shu guruhga tegishli.
+ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS room_id INTEGER REFERENCES chat_rooms(id) ON DELETE CASCADE;
+
+-- Guruh a'zoligi — guruhlar YOPIQ: faqat shu jadvaldagi (yoki xost/staff)
+-- foydalanuvchi o'qiy/yoza oladi. Xost taklif/chetlatish qiladi, admin va
+-- moderator ham (har qanday guruhga).
+CREATE TABLE IF NOT EXISTS room_members (
+    room_id     INTEGER NOT NULL REFERENCES chat_rooms(id) ON DELETE CASCADE,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    added_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    added_at    TIMESTAMP DEFAULT NOW(),
+    PRIMARY KEY (room_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_room_members_user ON room_members(user_id);
+
+-- Mavjud guruhlar uchun bitta martalik migratsiya — avval a'zolik yo'q edi,
+-- endi yopiq bo'lgani uchun kamida xostni a'zo qilib qo'yamiz (composite PK
+-- ON CONFLICT bilan xavfsiz — har deploy'da qayta ishlaydi, dublikat bo'lmaydi).
+INSERT INTO room_members (room_id, user_id, added_by)
+SELECT id, host_user_id, host_user_id FROM chat_rooms WHERE host_user_id IS NOT NULL
+ON CONFLICT (room_id, user_id) DO NOTHING;
+CREATE INDEX IF NOT EXISTS idx_chat_messages_room ON chat_messages(room_id, created_at);
 
 -- ============ Studiya/efir zayavkalari (AI agregator + moderator uchun) ============
 CREATE TABLE IF NOT EXISTS messages (
@@ -129,11 +183,50 @@ CREATE TABLE IF NOT EXISTS point_packages (
     is_active       BOOLEAN DEFAULT true
 );
 
-INSERT INTO point_packages (points_amount, price_eur, label) VALUES
-    (100, 1.00, '100 points'),
-    (500, 4.00, '500 points'),
-    (1500, 10.00, '1500 points'),
-    (5000, 25.00, '5000 points')
+-- Bot Telegram Stars orqali shu narxni ishlatadi (avval botda hardcode
+-- qilingan edi, endi shu ustundan o'qiydi — admin panel yagona haqiqat
+-- manbai). Mavjud qatorlar uchun eski hardcode bilan bir xil kurs (×100)
+-- bilan bir martalik to'ldiramiz.
+ALTER TABLE point_packages ADD COLUMN IF NOT EXISTS price_stars INTEGER NOT NULL DEFAULT 0;
+UPDATE point_packages SET price_stars = (price_eur * 100)::int WHERE price_stars = 0;
+
+-- Bir martalik tozalash: `ON CONFLICT DO NOTHING` pastda unique constraint'siz
+-- ishlatilgani uchun default paketlar har server restart'ida (demak har Railway
+-- deploy'ida ham) takrorlanib qo'shilib kelgan edi. Dublikatlarni bitta qoldirib
+-- tozalaymiz, keyin haqiqiy unique constraint qo'yamiz — shu yerdan boshlab
+-- reseed idempotent bo'ladi.
+DELETE FROM point_packages a USING point_packages b
+WHERE a.id > b.id
+  AND a.label = b.label
+  AND a.points_amount = b.points_amount
+  AND a.price_eur = b.price_eur;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'point_packages_label_key'
+    ) THEN
+        ALTER TABLE point_packages ADD CONSTRAINT point_packages_label_key UNIQUE (label);
+    END IF;
+END $$;
+
+INSERT INTO point_packages (points_amount, price_eur, label, price_stars) VALUES
+    (100, 1.00, '100 points', 100),
+    (500, 4.00, '500 points', 400),
+    (1500, 10.00, '1500 points', 1000),
+    (5000, 25.00, '5000 points', 2500)
+ON CONFLICT (label) DO NOTHING;
+
+-- ============ Ilova sozlamalari (key-value) — poinт to'lovi qanday ishlashini admin belgilaydi ============
+CREATE TABLE IF NOT EXISTS app_settings (
+    key         VARCHAR(64) PRIMARY KEY,
+    value       TEXT NOT NULL DEFAULT '',
+    updated_at  TIMESTAMP DEFAULT NOW()
+);
+
+INSERT INTO app_settings (key, value) VALUES
+    ('payment_method', 'stars'),
+    ('payment_instructions', '')
 ON CONFLICT DO NOTHING;
 
 -- ============ Seed data (har til = o'sha davlat haqida yangilik) ============
@@ -144,7 +237,7 @@ INSERT INTO news (language, title, body, sort_order) VALUES
     ('en', 'British Culture & Science', 'The UK gave the world Shakespeare, The Beatles and Newton. British universities remain among the best in the world.', 2),
     ('lt', 'Lietuva šiandien', 'Vilnius — Lietuvos širdis. Senamiestis, Gedimino pilis ir Trakų ežerai laukia svečių iš viso pasaulio. Šiandien šalyje vyksta kultūros festivaliai.', 1),
     ('lt', 'Lietuvos kultūra ir mokslas', 'Lietuva — krepšinio šalis ir Čiurlionio tėvynė. Lietuvių mokslininkai garsėja lazerių technologijomis visame pasaulyje.', 2)
-ON CONFLICT DO NOTHING;
+ON CONFLICT (language, title) DO NOTHING;
 
 
 -- ============ Efir mavzulari (admin yaratadi) ============
@@ -173,3 +266,60 @@ CREATE TABLE IF NOT EXISTS opinions (
 
 CREATE INDEX IF NOT EXISTS idx_opinions_topic ON opinions(topic_id, status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_opinions_user ON opinions(user_id, created_at DESC);
+
+-- ============ Musiqa nomzodlari (foydalanuvchi taklif qiladi) ============
+CREATE TABLE IF NOT EXISTS music_nominations (
+    id          SERIAL PRIMARY KEY,
+    topic_id    INTEGER REFERENCES topics(id) ON DELETE CASCADE,
+    user_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    title       VARCHAR(300) NOT NULL,    -- "Qo'shiq nomi — Artist"
+    artist      VARCHAR(200) DEFAULT '',
+    vote_count  INTEGER DEFAULT 0,
+    created_at  TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_music_nom_topic ON music_nominations(topic_id, vote_count DESC);
+
+-- ============ Musiqa ovoz berish ============
+CREATE TABLE IF NOT EXISTS music_votes (
+    id              SERIAL PRIMARY KEY,
+    nomination_id   INTEGER REFERENCES music_nominations(id) ON DELETE CASCADE,
+    user_id         INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    topic_id        INTEGER REFERENCES topics(id) ON DELETE CASCADE,
+    created_at      TIMESTAMP DEFAULT NOW(),
+    UNIQUE(user_id, topic_id)   -- har mavzu uchun bitta ovoz
+);
+CREATE INDEX IF NOT EXISTS idx_music_votes_nom ON music_votes(nomination_id);
+
+-- ============ Efir jadvali (broadcast slots) ============
+-- Admin ведущийga vaqt beradi, u shu vaqtda efirga chiqadi
+CREATE TABLE IF NOT EXISTS broadcast_slots (
+    id              SERIAL PRIMARY KEY,
+    host_user_id    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    title           VARCHAR(300) NOT NULL,         -- "Kechki efir: Sport"
+    description     TEXT DEFAULT '',
+    scheduled_at    TIMESTAMP NOT NULL,            -- efir boshlanadigan vaqt
+    duration_min    INTEGER DEFAULT 60,            -- daqiqalarda
+    status          VARCHAR(20) DEFAULT 'scheduled', -- scheduled | live | done | cancelled
+    share_url       VARCHAR(500) DEFAULT '',       -- bot orqali ulashish linki
+    cost_points     NUMERIC(12,4) DEFAULT 0,       -- ведущийdan olinadigan to'lov (keyingi bosqich)
+    created_by      INTEGER REFERENCES users(id),
+    created_at      TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_slots_scheduled ON broadcast_slots(scheduled_at, status);
+CREATE INDEX IF NOT EXISTS idx_slots_host ON broadcast_slots(host_user_id, status);
+
+-- ============ Кастинг (отбор ведущих) ============
+-- Foydalanuvchi ariza + audio-audishen topshiradi, admin ko'rib chiqib
+-- tasdiqlasa — role 'doverenniy' bo'ladi (efirga chiqish huquqi).
+CREATE TABLE IF NOT EXISTS casting_applications (
+    id              SERIAL PRIMARY KEY,
+    user_id         INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    audio_path      VARCHAR(500) NOT NULL,
+    note            TEXT DEFAULT '',                -- foydalanuvchi o'zi haqida qisqa matn
+    status          VARCHAR(20) DEFAULT 'pending',   -- pending | approved | rejected
+    admin_note      TEXT DEFAULT '',                 -- admin izohi (masalan rad etish sababi)
+    created_at      TIMESTAMP DEFAULT NOW(),
+    decided_at      TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_casting_status ON casting_applications(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_casting_user ON casting_applications(user_id, created_at DESC);

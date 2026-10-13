@@ -4,6 +4,7 @@ import { Radio, MessageSquare, Sparkles, Globe, Headphones, Mic } from 'lucide-r
 import { authenticate } from '../lib/auth';
 import { DEFAULT_CITY, LS_CITY } from '../lib/config';
 import { useTranslation } from '../hooks/useTranslation';
+import { GlitchText } from '../components/ui/GlitchText';
 import type { Language } from '../types';
 
 export function Splash() {
@@ -57,32 +58,40 @@ export function Splash() {
     { code: 'ru', label: 'RU' },
   ];
 
+  // Витрина концепции Riftline: 4 карточки — 4 разные вселенные,
+  // сталкивающиеся в одном кадре (см. таблицу в ТЗ).
   const features = [
-    { icon: Radio, label: t('features_realtime') },
-    { icon: Sparkles, label: t('features_ai') },
-    { icon: MessageSquare, label: t('features_chat') },
-    { icon: Globe, label: t('features_multilang') },
+    { icon: Radio, label: t('features_realtime'), zone: 'u3', rot: '-2deg' },
+    { icon: Sparkles, label: t('features_ai'), zone: 'u4', rot: '1.5deg' },
+    { icon: MessageSquare, label: t('features_chat'), zone: 'u2', rot: '2deg' },
+    { icon: Globe, label: t('features_multilang'), zone: 'u1', rot: '-1.5deg' },
   ];
+  const tornByIdx = ['rift-torn-a', 'rift-torn-b', 'rift-torn-c', 'rift-torn-a'];
 
   return (
-    <div className="min-h-screen bg-[#060a14] text-[#dbe9ff] flex flex-col items-center justify-center relative overflow-hidden px-5 py-8">
-      
+    <div className="rift-zone-u5 min-h-screen bg-[var(--bg)] text-[var(--text)] flex flex-col items-center justify-center relative overflow-hidden px-5 py-8">
+
       {/* Background ambient glow */}
       <div className="absolute inset-0 pointer-events-none overflow-hidden">
-        <div className="absolute top-[-20%] left-1/2 -translate-x-1/2 w-[500px] h-[500px] rounded-full bg-[radial-gradient(circle,rgba(56,225,255,0.08)_0%,transparent_70%)] animate-pulse" />
-        <div className="absolute bottom-[-10%] left-1/2 -translate-x-1/2 w-[400px] h-[400px] rounded-full bg-[radial-gradient(circle,rgba(46,168,255,0.06)_0%,transparent_70%)]" />
+        <div className="absolute top-[-20%] left-1/2 -translate-x-1/2 w-[500px] h-[500px] rounded-full bg-[radial-gradient(circle,rgba(0,240,192,0.09)_0%,transparent_70%)] animate-pulse" />
+        <div className="absolute bottom-[-10%] left-1/2 -translate-x-1/2 w-[400px] h-[400px] rounded-full bg-[radial-gradient(circle,rgba(49,46,129,0.3)_0%,transparent_70%)]" />
       </div>
 
-      {/* Language selector - top right */}
-      <div className="absolute top-4 right-4 z-20 flex gap-1.5">
+      {/* Language selector - top right. Telegram'ning o'z native
+          свернуть/закрыть/⋮ tugmalari aynan shu burchakda bo'lgani uchun,
+          qolgan ekranlar (Admin/RoomsScreen/EfirScreen/Chat) bilan bir xil
+          76px + safe-area отступ ishlatiladi (avval hech qanday отступ
+          yo'q edi — eng birinchi ko'rinadigan ekranda to'g'ridan-to'g'ri
+          Telegram chromesi ustiga tushib qolardi). */}
+      <div className="absolute right-4 z-20 flex gap-1.5" style={{ top: 'calc(76px + env(safe-area-inset-top))' }}>
         {languages.map(({ code, label }) => (
           <button
             key={code}
             onClick={() => setLang(code)}
             className={`px-2.5 py-1.5 text-[10px] font-bold tracking-wider rounded-lg transition-all duration-200 ${
               lang === code
-                ? 'glass text-[#38e1ff] shadow-[0_0_12px_rgba(56,225,255,0.3)]'
-                : 'bg-[rgba(255,255,255,0.03)] text-[#6b7c9e] border border-[rgba(255,255,255,0.06)] hover:text-[#dbe9ff]'
+                ? 'glass text-[var(--accent)] shadow-[0_0_12px_rgba(0,240,192,0.3)]'
+                : 'bg-[rgba(255,255,255,0.03)] text-[var(--muted)] border border-[rgba(255,255,255,0.06)] hover:text-[var(--text)]'
             }`}
           >
             {label}
@@ -92,23 +101,23 @@ export function Splash() {
 
       {/* Main content */}
       <div className="relative z-10 w-full max-w-[380px] flex flex-col items-center gap-8">
-        
+
         {/* Logo / Orb area */}
         <div className="relative flex flex-col items-center gap-5">
           {/* Animated orb behind logo */}
           <div className="relative w-[140px] h-[140px] flex items-center justify-center">
             {/* Outer ring */}
             <div
-              className="absolute inset-0 rounded-full border border-[rgba(56,225,255,0.2)]"
+              className="absolute inset-0 rounded-full border border-[rgba(0,240,192,0.22)]"
               style={{
                 animation: 'spin 12s linear infinite',
                 borderStyle: 'dashed',
-                boxShadow: '0 0 30px rgba(56,225,255,0.1) inset',
+                boxShadow: '0 0 30px rgba(0,240,192,0.12) inset',
               }}
             />
             {/* Middle ring */}
             <div
-              className="absolute inset-4 rounded-full border border-[rgba(46,168,255,0.3)]"
+              className="absolute inset-4 rounded-full border border-[rgba(251,146,60,0.3)]"
               style={{
                 animation: 'spin 18s linear infinite reverse',
                 borderStyle: 'dashed',
@@ -118,81 +127,80 @@ export function Splash() {
             <div
               className="absolute inset-8 rounded-full"
               style={{
-                background: 'radial-gradient(circle at 40% 35%, rgba(56,225,255,0.4), rgba(46,168,255,0.15), rgba(6,10,20,0.9) 70%)',
-                boxShadow: '0 0 40px rgba(56,225,255,0.3), inset 0 0 20px rgba(46,168,255,0.2)',
+                background: 'radial-gradient(circle at 40% 35%, rgba(0,240,192,0.4), rgba(49,46,129,0.25), rgba(13,13,16,0.9) 70%)',
+                boxShadow: '0 0 40px rgba(0,240,192,0.3), inset 0 0 20px rgba(251,146,60,0.2)',
               }}
             />
             {/* Center icon */}
             <div className="relative z-10 w-14 h-14 rounded-full glass flex items-center justify-center">
-              <Headphones className="w-7 h-7 text-[#38e1ff]" strokeWidth={1.8} />
+              <Headphones className="w-7 h-7 text-[var(--accent)]" strokeWidth={1.8} />
             </div>
           </div>
 
           {/* Brand */}
           <div className="text-center">
-            <h1 className="text-4xl font-black tracking-[3px] logo-gradient">
-              INTRA GROUP
-            </h1>
+            <GlitchText tag="h1" text="INTRA GROUP" className="text-4xl font-black tracking-[3px] logo-gradient" />
             <div className="flex items-center justify-center gap-3 mt-2">
-              <div className="h-px w-8 bg-gradient-to-r from-transparent to-[rgba(56,225,255,0.4)]" />
-              <p className="text-[10px] tracking-[4px] text-[#6b7c9e] font-semibold uppercase">
+              <div className="h-px w-8 bg-gradient-to-r from-transparent to-[rgba(0,240,192,0.4)]" />
+              <p className="text-[10px] tracking-[4px] text-[var(--muted)] font-semibold uppercase">
                 {t('brand_sub')}
               </p>
-              <div className="h-px w-8 bg-gradient-to-l from-transparent to-[rgba(56,225,255,0.4)]" />
+              <div className="h-px w-8 bg-gradient-to-l from-transparent to-[rgba(0,240,192,0.4)]" />
             </div>
-            <p className="text-xs text-[#8b9bb3] mt-2.5 leading-relaxed">
+            <p className="text-xs text-[var(--muted)] mt-2.5 leading-relaxed">
               {t('tagline')}
             </p>
           </div>
         </div>
 
-        {/* Features grid */}
-        <div className="w-full grid grid-cols-2 gap-2.5">
+        {/* Features grid — 4 карточки, 4 вселенные: главная витрина
+            концепции Riftline прямо на первом экране. */}
+        <div className="w-full grid grid-cols-2 gap-3">
           {features.map((feature, idx) => (
             <div
               key={idx}
-              className="glass p-3.5 rounded-2xl flex items-center gap-3 group hover:border-[rgba(56,225,255,0.3)] transition-all duration-300"
-              style={{
-                animationDelay: `${idx * 100}ms`,
-              }}
+              className={`rift-zone-${feature.zone} glass rift-halftone ${tornByIdx[idx]} p-3.5 flex items-center gap-2.5 group transition-all duration-300`}
+              style={{ transform: `rotate(${feature.rot})` }}
             >
-              <div className="w-9 h-9 rounded-xl bg-[rgba(56,225,255,0.1)] flex items-center justify-center flex-shrink-0 group-hover:bg-[rgba(56,225,255,0.15)] transition-colors">
-                <feature.icon className="w-4.5 h-4.5 text-[#38e1ff]" strokeWidth={1.8} />
+              <div className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: 'var(--glow)' }}>
+                <feature.icon className="w-4.5 h-4.5" style={{ color: 'var(--accent)' }} strokeWidth={1.8} />
               </div>
-              <span className="text-[11px] font-medium text-[#dbe9ff] leading-tight">
+              <span className="text-[11px] font-bold leading-tight" style={{ fontFamily: 'var(--zone-font-display)', color: 'var(--text)' }}>
                 {feature.label}
               </span>
             </div>
           ))}
         </div>
 
+        <div className="rift-diagonal w-full" />
+
         {/* Loading card */}
         <div className="w-full glass p-5 rounded-2xl">
           {/* Status */}
           <div className="flex items-center justify-center gap-2.5 mb-4">
-            <div className={`w-2 h-2 rounded-full ${phase === 'ready' ? 'bg-[#22e3a5]' : 'bg-[#38e1ff] animate-pulse'}`} />
-            <p className="text-sm font-medium text-[#dbe9ff]">
+            <div className={`w-2 h-2 rounded-full ${phase === 'ready' ? 'bg-[var(--live)]' : 'bg-[var(--accent)] animate-pulse'}`} />
+            <p className="text-sm font-medium text-[var(--text)]">
               {phase === 'ready' ? t('welcome') : t('connecting')}
             </p>
           </div>
 
           {/* Progress bar */}
-          <div className="relative h-1.5 bg-[rgba(46,168,255,0.1)] rounded-full overflow-hidden">
+          <div className="relative h-1.5 bg-[rgba(0,240,192,0.1)] rounded-full overflow-hidden">
             <div
               className="absolute top-0 left-0 h-full rounded-full transition-all duration-300 ease-out"
               style={{
                 width: `${progress}%`,
                 background: phase === 'ready'
-                  ? 'linear-gradient(90deg, #22e3a5, #38e1ff)'
-                  : 'linear-gradient(90deg, #2ea8ff, #38e1ff)',
-                boxShadow: `0 0 12px ${phase === 'ready' ? 'rgba(34,227,165,0.5)' : 'rgba(56,225,255,0.5)'}`,
+                  ? 'linear-gradient(90deg, #39FF6A, #00F0C0)'
+                  : 'linear-gradient(90deg, #5ffbe0, #00F0C0)',
+                boxShadow: `0 0 12px ${phase === 'ready' ? 'rgba(57,255,106,0.5)' : 'rgba(0,240,192,0.5)'}`,
               }}
             />
           </div>
 
           {/* Percentage */}
           <div className="text-center mt-2.5">
-            <span className="text-[11px] font-mono text-[#6b7c9e]">
+            <span className="text-[11px] font-mono text-[var(--muted)]">
               {Math.round(progress)}%
             </span>
           </div>
@@ -200,12 +208,12 @@ export function Splash() {
 
         {/* Bottom decoration */}
         <div className="flex items-center gap-2 opacity-50">
-          <Mic className="w-3 h-3 text-[#38e1ff]" strokeWidth={2} />
+          <Mic className="w-3 h-3 text-[var(--accent)]" strokeWidth={2} />
           <div className="flex gap-0.5">
             {Array.from({ length: 12 }).map((_, i) => (
               <div
                 key={i}
-                className="w-0.5 bg-[#38e1ff] rounded-full animate-pulse"
+                className="w-0.5 bg-[var(--accent)] rounded-full animate-pulse"
                 style={{
                   height: `${6 + Math.random() * 10}px`,
                   animationDelay: `${i * 80}ms`,
@@ -214,7 +222,7 @@ export function Splash() {
               />
             ))}
           </div>
-          <Mic className="w-3 h-3 text-[#38e1ff]" strokeWidth={2} />
+          <Mic className="w-3 h-3 text-[var(--accent)]" strokeWidth={2} />
         </div>
       </div>
 

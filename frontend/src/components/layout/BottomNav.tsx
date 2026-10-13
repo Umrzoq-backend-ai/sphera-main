@@ -1,64 +1,71 @@
+import { MessageCircle, TrendingUp, Radio, Music, User } from 'lucide-react';
 import type { Screen } from '../../types';
 
 interface BottomNavProps {
   currentScreen: Screen;
   onNavigate: (screen: Screen) => void;
+  // Profil tugmasi ustidagi значok — masalan ko'rib chiqilmagan kasting
+  // arizalari soni (faqat haqiqiy admin uchun beriladi, boshqalarda 0).
+  profileBadgeCount?: number;
 }
 
-/* Material Symbols ikonka (Stitch dizayni) */
-function MIcon({ name, fill = false, size = 26 }: { name: string; fill?: boolean; size?: number }) {
-  return (
-    <span
-      className={`material-symbols-outlined${fill ? ' fill' : ''}`}
-      style={{ fontSize: size }}
-    >
-      {name}
-    </span>
-  );
-}
+const ICONS: Record<string, typeof MessageCircle> = {
+  chat: MessageCircle,
+  show_chart: TrendingUp,
+  radio: Radio,
+  music_note: Music,
+  person: User,
+};
 
-export function BottomNav({ currentScreen, onNavigate }: BottomNavProps) {
-  // Stitch dizayni: explore | podcasts | [ORB] | spatial_audio | person
+export function BottomNav({ currentScreen, onNavigate, profileBadgeCount = 0 }: BottomNavProps) {
+  // Stitch dizayni: chat | podcasts | [ORB] | spatial_audio | person
   const navItems: { id: Screen; icon: string; isCenter?: boolean }[] = [
-    { id: 'anons', icon: 'explore' },
+    { id: 'anons', icon: 'chat' },
     { id: 'stats', icon: 'show_chart' },
     { id: 'efir', icon: 'radio', isCenter: true },
-    { id: 'favorites', icon: 'star' },
+    { id: 'music', icon: 'music_note' },
     { id: 'profile', icon: 'person' },
   ];
 
   return (
-    <nav className="fixed bottom-0 left-0 right-0 z-50 pointer-events-none">
+    <nav className="rift-zone-u5 fixed bottom-0 left-0 right-0 z-50 pointer-events-none">
       <div
-        className="pointer-events-auto max-w-[460px] sm:max-w-[480px] lg:max-w-[520px] mx-auto px-4 pb-[calc(8px+env(safe-area-inset-bottom))] pt-2"
+        className="pointer-events-auto max-w-[460px] sm:max-w-[480px] lg:max-w-[520px] mx-auto px-4 pt-2"
         style={{
-          background: 'linear-gradient(180deg, transparent 0%, rgba(6,10,20,0.92) 30%, rgba(6,10,20,0.99) 100%)',
+          background: 'linear-gradient(180deg, transparent 0%, rgba(13,13,16,0.92) 30%, rgba(13,13,16,0.99) 100%)',
+          // Android jismoniy "Kнопки" navigatsiya paneli bilan
+          // to'qnashmasin — Telegram native ilova bergan --tg-safe-bottom
+          // (ishonchliroq) va brauzerning o'z env(safe-area-inset-bottom)
+          // ikkalasidan kattarog'i olinadi.
+          paddingBottom: 'calc(6px + max(env(safe-area-inset-bottom), var(--tg-safe-bottom, 0px)))',
         }}
       >
         <div
-          className="flex justify-around items-center h-[68px] px-2 rounded-[28px] relative"
+          className="flex justify-around items-center h-[60px] px-2.5 relative"
           style={{
-            background: 'rgba(10,18,36,0.92)',
-            border: '1px solid rgba(56,225,255,0.12)',
-            boxShadow: '0 -4px 30px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.04)',
+            background: 'rgba(13,13,16,0.94)',
+            border: '2px solid rgba(0,240,192,0.3)',
+            borderRadius: '10px',
+            boxShadow: '3px 3px 0 rgba(0,0,0,0.4), 0 -4px 20px rgba(0,0,0,0.5)',
           }}
         >
           {navItems.map((item) => {
             const isActive = currentScreen === item.id;
+            const Icon = ICONS[item.icon];
 
             if (item.isCenter) {
               return (
                 <button
                   key={item.id}
                   onClick={() => onNavigate(item.id)}
-                  className="relative -translate-y-5 active:scale-90 transition-transform duration-150"
+                  className="relative -translate-y-4 active:scale-90 transition-transform duration-150"
                   aria-label="efir"
                 >
                   {/* Aylanuvchi tashqi halqa */}
                   <span className="orb-ring" />
                   {/* Asosiy orb + ichida radio ikonka */}
                   <div className={`orb-nav ${isActive ? 'orb-active' : ''}`}>
-                    <MIcon name="radio" fill size={26} />
+                    <Icon size={21} fill="currentColor" strokeWidth={1.5} />
                   </div>
                 </button>
               );
@@ -68,14 +75,25 @@ export function BottomNav({ currentScreen, onNavigate }: BottomNavProps) {
               <button
                 key={item.id}
                 onClick={() => onNavigate(item.id)}
-                className="flex items-center justify-center w-11 h-11 rounded-xl transition-all duration-200 active:scale-90"
+                className="relative flex items-center justify-center w-10 h-10 transition-all duration-200 active:scale-90"
                 style={{
-                  color: isActive ? '#38e1ff' : '#6b7c9e',
-                  filter: isActive ? 'drop-shadow(0 0 10px rgba(56,225,255,0.7))' : 'none',
-                  transform: isActive ? 'scale(1.1)' : 'scale(1)',
+                  color: isActive ? '#001a14' : '#9a9a9a',
+                  background: isActive ? '#00F0C0' : 'rgba(0,240,192,0.06)',
+                  border: isActive ? '2px solid #EDEDED' : '1px solid rgba(0,240,192,0.18)',
+                  borderRadius: isActive ? '8px' : '6px',
+                  boxShadow: isActive ? '2px 2px 0 rgba(0,0,0,0.35)' : 'none',
+                  transform: isActive ? 'rotate(-2deg) scale(1.05)' : 'scale(1)',
                 }}
               >
-                <MIcon name={item.icon} fill={isActive} size={26} />
+                <Icon size={19} fill={isActive ? 'currentColor' : 'none'} strokeWidth={2} />
+                {item.id === 'profile' && profileBadgeCount > 0 && (
+                  <span
+                    className="absolute top-0 right-0.5 min-w-[16px] h-[16px] px-[3px] rounded-full flex items-center justify-center text-[9px] font-extrabold text-white"
+                    style={{ background: '#FF3B5C', boxShadow: '0 0 0 2px #0d0d10' }}
+                  >
+                    {profileBadgeCount > 9 ? '9+' : profileBadgeCount}
+                  </span>
+                )}
               </button>
             );
           })}

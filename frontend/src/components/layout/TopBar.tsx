@@ -1,3 +1,6 @@
+import { Radio, Zap } from 'lucide-react';
+import { GlitchText } from '../ui/GlitchText';
+
 interface TopBarProps {
   points: number;
 }
@@ -5,12 +8,10 @@ interface TopBarProps {
 export function TopBar({ points }: TopBarProps) {
   return (
     <header className="flex items-center justify-between py-2">
-      {/* Logo — radio ikonka + 3 rangli gradient (Stitch) */}
+      {/* Logo — radio ikonka + warm gradient */}
       <div className="flex items-center gap-2">
-        <span className="material-symbols-outlined fill text-[#38e1ff]" style={{ fontSize: 22 }}>
-          radio
-        </span>
-        <span className="text-[17px] font-extrabold tracking-[1.5px] uppercase logo-gradient">
+        <Radio size={22} fill="currentColor" strokeWidth={1.5} className="text-[var(--accent)]" />
+        <span className="text-[17px] font-extrabold tracking-[1.5px] uppercase logo-gradient font-display">
           INTRA GROUP
         </span>
       </div>
@@ -19,17 +20,16 @@ export function TopBar({ points }: TopBarProps) {
       <div
         className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-full"
         style={{
-          background: 'rgba(37,42,53,0.6)',
-          border: '1px solid rgba(56,225,255,0.2)',
-          boxShadow: '0 0 15px rgba(39,217,247,0.1)',
+          background: 'rgba(13,13,16,0.8)',
+          border: '1px solid rgba(0,240,192,0.16)',
         }}
       >
-        <span className="material-symbols-outlined text-[#27d9f7]" style={{ fontSize: 16 }}>
-          bolt
-        </span>
-        <span className="font-mono text-sm font-bold text-[#27d9f7] tabular-nums">
-          {Number(points).toFixed(3)}
-        </span>
+        <Zap size={16} className="text-[#9a9a9a]" />
+        <GlitchText
+          tag="span"
+          text={Number(points).toFixed(3)}
+          className="font-mono text-sm font-bold text-[#EDEDED] tabular-nums"
+        />
       </div>
     </header>
   );

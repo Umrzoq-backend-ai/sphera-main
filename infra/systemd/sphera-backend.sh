@@ -9,22 +9,21 @@ export SECRET_KEY=devsecretkey1234567890devsecret
 export UPLOAD_DIR=/mnt/d/KIro_projectsbot/sphera-main/.uploads AUDIO_DIR=/mnt/d/KIro_projectsbot/sphera-main/.audio
 export MINIAPP_DIR="$ROOT/frontend/dist"
 export FILLER_SECONDS=30
-export BOT_TOKEN=8858693463:AAEf2t1kWgBD6gv7-Nlm7si1HPABdRA9C-0
+export BOT_TOKEN=6725497158:AAG4sl-lm7E8G7AsyKrhBgjg-Li2jwl47ek
 export COMMUNITY_CHAT_ID=-1003883809940
 export ADMIN_IDS=7993413019
 export DISABLE_GROUP_CHECK=true
 export GEMINI_KEY=AIzaSyBQvjFvGyIJjkJPlr2IJilVHkKnOOo-pJ0
 export GEMINI_MODEL=gemini-2.5-flash
-export USE_ICECAST=true ICECAST_HOST=localhost ICECAST_PORT=8000
-export ICECAST_PASS='IcecastPass2025!' ICECAST_ADMIN_PASS='IcecastAdmin2025!'
+export USE_MEDIAMTX=true MEDIAMTX_HOST=localhost MEDIAMTX_RTMP_PORT=1935
+export MEDIAMTX_PUBLISH_PASS='MediaMTXPass2025!'
 export TTS_PROVIDER=edge TTS_FALLBACK_EDGE=true
 export AI_HOST_INTERVAL=60
 
-# Icecast tunnel URL — har safar fayl dan o'qiymiz (reboot'dan keyin avtomatik yangilanadi)
-ICECAST_URL_FILE="$ROOT/.logs/icecast_tunnel_url.txt"
-if [ -f "$ICECAST_URL_FILE" ]; then
-  export ICECAST_PUBLIC_URL=$(cat "$ICECAST_URL_FILE")
-fi
+# MediaMTX'ning HLS publik manzili (RTMP ingest — shu skriptdagi
+# MEDIAMTX_HOST orqali, faqat backend uchun; bu esa tinglovchi brauzer
+# to'g'ridan ulanadigan HLS manzili).
+export MEDIAMTX_PUBLIC_URL='https://your-mediamtx-domain'
 
 cd "$ROOT/backend"
 exec "$VENV/uvicorn" app.main:app --host 0.0.0.0 --port 8001

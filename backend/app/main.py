@@ -7,22 +7,37 @@ Yangi TZ:
 - Point transfer/request/purchase
 """
 
-import os
-import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
-from app.core.config import settings
-from app.core.logging_config import setup_logging
-from app.core.database import db
+from app.api.routers import (
+    admin,
+    auth,
+    casting,
+    chat,
+    favorites,
+    messages,
+    music,
+    news,
+    opinions,
+    radio,
+    rooms,
+    slots,
+    stats,
+    users,
+    voicechat,
+)
 from app.core import redis as redis_client
+from app.core.config import settings
+from app.core.database import db
+from app.core.logging_config import setup_logging
 from app.core.middleware import RequestLoggingMiddleware
-from app.api.routers import auth, users, chat, admin, news, messages, radio, voicechat, opinions, stats, favorites
 
 setup_logging(debug=settings.debug)
 log = logging.getLogger("app")
@@ -42,23 +57,35 @@ async def lifespan(app: FastAPI):
     # 3. Redis (graceful fallback)
     await redis_client.connect()
 
-    # 4. Uzluksiz Icecast oqimi (USE_ICECAST=true bo'lsa) — har til uchun worker
+    # 3.5 Xizmat narxlari (xabar/efir uchun point narxlari) — app_settings'dan
+    from app.services import pricing
+
+    await pricing.reload()
+
+    # 4. Uzluksiz MediaMTX oqimi (USE_MEDIAMTX=true bo'lsa) — har til uchun worker
     from app.services import continuous
+
     await continuous.start()
 
-    # 5. AI radio host — efirni uzluksiz kontent bilan to'ldiradi (USE_ICECAST=true)
+    # 5. AI radio host — efirni uzluksiz kontent bilan to'ldiradi (USE_MEDIAMTX=true)
     from app.services import ai_host
+
     await ai_host.start()
 
     # 6. Voice Chat userbot (Telegram guruh ovozli chati — Boss talabi)
     from app.services import voicechat
+
     await voicechat.start()
+
+    # 7. Slot muddati tugagan jonli efirlarni avto-to'xtatuvchi watchdog
+    await radio.start_expiry_watchdog()
 
     log.info("Application started successfully")
     yield
 
     # Shutdown
     log.info("Shutting down...")
+    await radio.stop_expiry_watchdog()
     await voicechat.stop()
     await ai_host.stop()
     await continuous.stop()
@@ -70,15 +97,20 @@ async def lifespan(app: FastAPI):
 async def _run_migrations() -> None:
     """Schema SQL faylini o'qib, jadvallarni yaratadi (CREATE IF NOT EXISTS)."""
     import os
-    schema_path = os.path.join(os.path.dirname(__file__), "app", "db", "schema.sql")
+
+    # __file__ = .../app/main.py — schema.sql shu papkaning "db" ostida
+    # (bu formula lokal ishga tushirishда HAM, Docker'da HAM to'g'ri ishlaydi;
+    # oldingi versiya "app"ni ikki marta qo'shib, faqat Docker'da tasodifan
+    # to'g'ri chiqardi, lokal ishga tushirishда esa har doim migratsiyani
+    # sukut bilan o'tkazib yuborardi).
+    schema_path = os.path.join(os.path.dirname(__file__), "db", "schema.sql")
     if not os.path.exists(schema_path):
-        # Docker ichida to'g'ridan path
         schema_path = "/app/app/db/schema.sql"
     if not os.path.exists(schema_path):
         log.warning("Schema file not found, skipping migration")
         return
     try:
-        with open(schema_path, "r") as f:
+        with open(schema_path) as f:
             sql = f.read()
         await db.execute(sql)
         log.info("Database migration completed")
@@ -106,6 +138,28 @@ app.add_middleware(
 # Request logging
 app.add_middleware(RequestLoggingMiddleware)
 
+
+# Statik javoblar uchun cache sarlavhalari — hech qanday Cache-Control
+# bo'lmasa, mobil WebView'lar (xususan Telegram Mini App ichidagi iOS
+# WKWebView) index.html'ni juda uzoq vaqt keshda saqlab qolishi mumkin,
+# shuning uchun yangi deploy qilingan JS/CSS fayllar ko'rinmay qoladi
+# (foydalanuvchi eski build'ni ko'raverdi). index.html hech qachon
+# keshlanmasin (har doim eng yangi assets/*.js havolasini olib kelsin),
+# assets/* esa fayl nomida hash bo'lgani uchun abadiy keshlansa bo'ladi.
+@app.middleware("http")
+async def _cache_control_headers(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if path.startswith("/assets/"):
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    elif "cache-control" not in response.headers:
+        # index.html va SPA fallback (client-side routing — yo'l istalgan
+        # bo'lishi mumkin, shuning uchun aniq "/" yoki ".html" bilan
+        # cheklab bo'lmaydi) doim tarmoqdan qayta olinsin.
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 # Routers
 app.include_router(auth.router)
 app.include_router(users.router)
@@ -118,6 +172,10 @@ app.include_router(voicechat.router)
 app.include_router(opinions.router)
 app.include_router(stats.router)
 app.include_router(favorites.router)
+app.include_router(music.router)
+app.include_router(slots.router)
+app.include_router(casting.router)
+app.include_router(rooms.router)
 
 
 # Global exception handler
@@ -171,8 +229,17 @@ if settings.miniapp_dir and os.path.isdir(settings.miniapp_dir):
     @app.exception_handler(StarletteHTTPException)
     async def _spa_fallback(request, exc):
         # API yo'llari uchun JSON xato qaytaramiz
-        api_prefixes = ("/auth/", "/users/", "/chat/", "/news/", "/admin/",
-                        "/messages/", "/radio/", "/health", "/api")
+        api_prefixes = (
+            "/auth/",
+            "/users/",
+            "/chat/",
+            "/news/",
+            "/admin/",
+            "/messages/",
+            "/radio/",
+            "/health",
+            "/api",
+        )
         if request.url.path.startswith(api_prefixes):
             return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
         # Frontend SPA uchun index.html
@@ -184,6 +251,7 @@ if settings.miniapp_dir and os.path.isdir(settings.miniapp_dir):
 
     app.mount("/", StaticFiles(directory=settings.miniapp_dir, html=True), name="miniapp")
 else:
+
     @app.get("/")
     async def root():
         return {"service": "INTRA GROUP", "version": "3.0.0", "status": "ok"}

@@ -2,12 +2,15 @@ import { API_URL } from './config';
 import { authHeaders } from './auth';
 import type {
   User, RadioStatus, ChatMessage, Announcements, AudioSegment,
-  News, PointsRequest, PointPackage,
+  News, PointsRequest, PointPackage, PointsTransaction, PaymentSettings, AdminPackage, ChatRoom,
 } from '../types';
 
 // ============ Users / Profile ============
 export async function getMe(): Promise<User> {
-  const resp = await fetch(`${API_URL}/users/me`, { headers: authHeaders() });
+  // cache: 'no-store' — ba'zi mobil WebView'lar (jumladan Telegram Mini App)
+  // GET so'rovlarni eskirgan holda keshlab qo'yishi mumkin, natijada balans
+  // yangilanmaganday ko'rinadi.
+  const resp = await fetch(`${API_URL}/users/me`, { headers: authHeaders(), cache: 'no-store' });
   if (!resp.ok) throw new Error('Failed to fetch user');
   return resp.json();
 }
@@ -64,7 +67,7 @@ export async function getAnnouncements(): Promise<Announcements> {
 
 // ============ Points ============
 export async function getPointsBalance() {
-  const resp = await fetch(`${API_URL}/users/me/points`, { headers: authHeaders() });
+  const resp = await fetch(`${API_URL}/users/me/points`, { headers: authHeaders(), cache: 'no-store' });
   if (!resp.ok) throw new Error('Failed to fetch balance');
   return resp.json();
 }
@@ -113,9 +116,21 @@ export async function decideRequest(request_id: number, approve: boolean) {
   return resp.json();
 }
 
+export async function getPointsHistory(): Promise<PointsTransaction[]> {
+  const resp = await fetch(`${API_URL}/users/me/points/history`, { headers: authHeaders(), cache: 'no-store' });
+  if (!resp.ok) throw new Error('Failed to fetch points history');
+  return resp.json();
+}
+
 export async function getPackages(): Promise<PointPackage[]> {
   const resp = await fetch(`${API_URL}/users/me/points/packages`, { headers: authHeaders() });
   if (!resp.ok) throw new Error('Failed to fetch packages');
+  return resp.json();
+}
+
+export async function getPaymentMethod(): Promise<PaymentSettings> {
+  const resp = await fetch(`${API_URL}/users/me/points/payment-method`, { headers: authHeaders() });
+  if (!resp.ok) throw new Error('Failed to fetch payment method');
   return resp.json();
 }
 
@@ -151,10 +166,10 @@ export async function getPlaylist(_city?: string): Promise<AudioSegment[]> {
   return [];
 }
 
-export function getStreamUrl(lang: string, _streamUrlFromStatus?: string | null): string {
-  // Har doim same-origin proxy — CORS muammosi yo'q,
-  // Telegram WebView ham bemalol ulanadi.
-  return `${API_URL}/radio/live/${lang}`;
+export function getStreamUrl(_lang: string, streamUrlFromStatus?: string | null): string {
+  // MediaMTX HLS endpoint publik — browser to'g'ridan ulanadi (hls.js/native),
+  // backend /radio/status orqali beradi (same-origin proksi endi kerak emas).
+  return streamUrlFromStatus || '';
 }
 
 // ============ Chat ============
@@ -219,6 +234,50 @@ export async function sendVoiceMessage(
 
 export async function sendTextMessage(_city: string, text: string, _lang: string) {
   return sendChatMessage(_city, text);
+}
+
+// ============ Casting (ведущий отбори) ============
+export interface CastingStatus {
+  applied: boolean;
+  status?: 'pending' | 'approved' | 'rejected';
+  admin_note?: string;
+  created_at?: string;
+  already_doverenniy?: boolean;
+}
+
+export async function getCastingStatus(): Promise<CastingStatus> {
+  const resp = await fetch(`${API_URL}/casting/status`, { headers: authHeaders() });
+  if (!resp.ok) throw new Error('Failed to fetch casting status');
+  return resp.json();
+}
+
+export async function applyCasting(audioBlob: Blob, note: string): Promise<any> {
+  const typeExtMap: Record<string, string> = {
+    'audio/mp4': 'm4a',
+    'audio/mpeg': 'mp3',
+    'audio/ogg': 'ogg',
+    'audio/webm': 'webm',
+    'audio/wav': 'wav',
+  };
+  const baseType = (audioBlob.type || 'audio/webm').split(';')[0];
+  const ext = typeExtMap[baseType] || 'webm';
+
+  const fd = new FormData();
+  fd.append('audio_file', audioBlob, `audition.${ext}`);
+  fd.append('note', note);
+
+  const resp = await fetch(`${API_URL}/casting/apply`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: fd,
+  });
+  if (!resp.ok) {
+    const err: any = await resp.json().catch(() => ({}));
+    const error: any = new Error(err?.detail || 'Failed to submit casting application');
+    error.status = resp.status;
+    throw error;
+  }
+  return resp.json();
 }
 
 export async function uploadFile(_city: string, _file: File) {
@@ -309,6 +368,15 @@ export async function getUsers() {
   return resp.json();
 }
 
+// Faqat sonini olish uchun yengil chaqiruv — BottomNav'dagi Profil
+// значоки va Admin panelning "Кастинг" tab значoki shu bilan ishlaydi.
+export async function adminGetCastingPendingCount(): Promise<number> {
+  const resp = await fetch(`${API_URL}/casting/admin/list?status=pending`, { headers: authHeaders() });
+  if (!resp.ok) return 0;
+  const data = await resp.json().catch(() => []);
+  return Array.isArray(data) ? data.length : 0;
+}
+
 export async function adminSetLevel(user_id: number, level: number) {
   const resp = await fetch(`${API_URL}/admin/users/set-level`, {
     method: 'POST',
@@ -319,6 +387,54 @@ export async function adminSetLevel(user_id: number, level: number) {
   return resp.json();
 }
 
+// Admin yoki moderator huquqi berish/qaytarib olish — level 1/2/3
+// zinapoyasidan alohida, faqat mavjud admin bera oladi (moderator emas).
+export type StaffRole = 'admin' | 'moderator' | 'none';
+export async function adminSetStaffRole(user_id: number, role: StaffRole) {
+  const resp = await fetch(`${API_URL}/admin/users/set-admin`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ user_id, role }),
+  });
+  if (!resp.ok) {
+    const e = await resp.json().catch(() => ({}));
+    throw new Error(typeof e.detail === 'string' ? e.detail : 'Failed to set role');
+  }
+  return resp.json();
+}
+
+// Efir bo'sh paytida (AI navbat) va jonli efir pauzasida jimlik o'rniga
+// chaladigan musiqa — Music tab (Admin) va MusicScreen (admin/ведущий) uchun.
+export async function getDefaultMusic(): Promise<{ name: string | null; url: string | null }> {
+  const resp = await fetch(`${API_URL}/admin/music/default`, { headers: authHeaders() });
+  if (!resp.ok) return { name: null, url: null };
+  return resp.json();
+}
+
+export async function uploadDefaultMusic(file: File) {
+  const form = new FormData();
+  form.append('audio_file', file);
+  const resp = await fetch(`${API_URL}/admin/music/default`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: form,
+  });
+  if (!resp.ok) {
+    const e = await resp.json().catch(() => ({}));
+    throw new Error(typeof e.detail === 'string' ? e.detail : 'Failed to upload music');
+  }
+  return resp.json();
+}
+
+export async function deleteDefaultMusic() {
+  const resp = await fetch(`${API_URL}/admin/music/default`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  });
+  if (!resp.ok) throw new Error('Failed to delete music');
+  return resp.json();
+}
+
 export async function adminAddPoints(user_id: number, amount: number) {
   const resp = await fetch(`${API_URL}/admin/users/add-points`, {
     method: 'POST',
@@ -326,6 +442,85 @@ export async function adminAddPoints(user_id: number, amount: number) {
     body: JSON.stringify({ user_id, amount }),
   });
   if (!resp.ok) throw new Error('Failed to add points');
+  return resp.json();
+}
+
+// ============ Admin: to'lov sozlamalari va paketlar ============
+export async function adminGetPaymentSettings(): Promise<PaymentSettings> {
+  const resp = await fetch(`${API_URL}/admin/settings/payment`, { headers: authHeaders() });
+  if (!resp.ok) throw new Error('Failed to fetch payment settings');
+  return resp.json();
+}
+
+export async function adminUpdatePaymentSettings(method: 'stars' | 'manual', instructions: string): Promise<PaymentSettings> {
+  const resp = await fetch(`${API_URL}/admin/settings/payment`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ method, instructions }),
+  });
+  if (!resp.ok) throw new Error('Failed to update payment settings');
+  return resp.json();
+}
+
+export async function adminListPackages(): Promise<AdminPackage[]> {
+  const resp = await fetch(`${API_URL}/admin/packages`, { headers: authHeaders() });
+  if (!resp.ok) throw new Error('Failed to fetch packages');
+  return resp.json();
+}
+
+export async function adminCreatePackage(data: { points_amount: number; price_eur: number; price_stars: number; label: string }): Promise<AdminPackage> {
+  const resp = await fetch(`${API_URL}/admin/packages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(data),
+  });
+  if (!resp.ok) throw new Error('Failed to create package');
+  return resp.json();
+}
+
+export async function adminUpdatePackage(id: number, data: { points_amount: number; price_eur: number; price_stars: number; label: string; is_active: boolean }): Promise<AdminPackage> {
+  const resp = await fetch(`${API_URL}/admin/packages/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(data),
+  });
+  if (!resp.ok) throw new Error('Failed to update package');
+  return resp.json();
+}
+
+export async function adminDeletePackage(id: number) {
+  const resp = await fetch(`${API_URL}/admin/packages/${id}`, {
+    method: 'DELETE', headers: authHeaders(),
+  });
+  if (!resp.ok) throw new Error('Failed to delete package');
+  return resp.json();
+}
+
+// ============ Admin: xizmat narxlari (FAQAT haqiqiy admin) ============
+export interface Pricing {
+  price_text_message: string;
+  price_voice_message: string;
+  price_slot_per_hour: string;
+}
+
+export async function adminGetPricing(): Promise<Pricing> {
+  const resp = await fetch(`${API_URL}/admin/pricing`, { headers: authHeaders() });
+  if (!resp.ok) throw new Error('Failed to fetch pricing');
+  return resp.json();
+}
+
+export async function adminUpdatePricing(data: {
+  price_text_message: number; price_voice_message: number; price_slot_per_hour: number;
+}): Promise<Pricing> {
+  const resp = await fetch(`${API_URL}/admin/pricing`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(data),
+  });
+  if (!resp.ok) {
+    const e = await resp.json().catch(() => ({}));
+    throw new Error(typeof e.detail === 'string' ? e.detail : 'Failed to update pricing');
+  }
   return resp.json();
 }
 
@@ -359,46 +554,6 @@ export async function getUserStats(): Promise<UserStats> {
   return resp.json();
 }
 
-// ============ Favorites ============
-export interface FavoriteItem {
-  id: number;
-  item_type: string;
-  item_id: number;
-  title: string;
-  content: string | null;
-  broadcaster: string | null;
-  duration: number | null;
-  audio_url: string | null;
-  created_at: string;
-}
-
-export async function getFavorites(): Promise<FavoriteItem[]> {
-  const resp = await fetch(`${API_URL}/users/favorites`, { headers: authHeaders() });
-  if (!resp.ok) throw new Error('Failed to fetch favorites');
-  return resp.json();
-}
-
-export async function addFavorite(data: {
-  item_type: string; item_id: number; title: string;
-  content?: string; broadcaster?: string; duration?: number; audio_url?: string;
-}): Promise<FavoriteItem> {
-  const resp = await fetch(`${API_URL}/users/favorites`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify(data),
-  });
-  if (!resp.ok) throw new Error('Failed to add favorite');
-  return resp.json();
-}
-
-export async function removeFavorite(favoriteId: number) {
-  const resp = await fetch(`${API_URL}/users/favorites/${favoriteId}`, {
-    method: 'DELETE', headers: authHeaders(),
-  });
-  if (!resp.ok) throw new Error('Failed to remove favorite');
-  return resp.json();
-}
-
 // ============ Voice Chat Status ============
 export interface VoiceChatStatus {
   configured: boolean;
@@ -411,4 +566,275 @@ export async function getVoiceChatStatus(): Promise<VoiceChatStatus> {
     if (resp.ok) return resp.json();
   } catch {}
   return { configured: false, in_call: false };
+}
+
+// ============ Music Voting ============
+export interface MusicNomination {
+  id: number;
+  title: string;
+  artist: string;
+  vote_count: number;
+  username: string | null;
+  display_name: string | null;
+  user_voted: boolean;
+  created_at: string;
+}
+
+export interface MusicCurrentResult {
+  topic: { id: number; title: string } | null;
+  nominations: MusicNomination[];
+}
+
+export async function getMusicCurrent(): Promise<MusicCurrentResult> {
+  const resp = await fetch(`${API_URL}/music/current`, { headers: authHeaders() });
+  if (!resp.ok) return { topic: null, nominations: [] };
+  return resp.json();
+}
+
+export async function getMusicNominations(topicId: number): Promise<MusicNomination[]> {
+  const resp = await fetch(`${API_URL}/music/nominations/${topicId}`, { headers: authHeaders() });
+  if (!resp.ok) throw new Error('Failed');
+  return resp.json();
+}
+
+export async function addMusicNomination(topicId: number, title: string, artist = '') {
+  const resp = await fetch(`${API_URL}/music/nominations`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ topic_id: topicId, title, artist }),
+  });
+  if (!resp.ok) {
+    const e = await resp.json().catch(() => ({}));
+    throw new Error(e.detail || 'Failed');
+  }
+  return resp.json();
+}
+
+export async function voteMusicNomination(nominationId: number) {
+  const resp = await fetch(`${API_URL}/music/vote/${nominationId}`, {
+    method: 'POST', headers: authHeaders(),
+  });
+  if (!resp.ok) {
+    const e = await resp.json().catch(() => ({}));
+    throw new Error(e.detail || 'Failed');
+  }
+  return resp.json();
+}
+
+export async function getMusicWinner(topicId: number) {
+  const resp = await fetch(`${API_URL}/music/winner/${topicId}`, { headers: authHeaders() });
+  if (!resp.ok) return { winner: null };
+  return resp.json();
+}
+
+// ============ Broadcast Slots (Efir jadvali) ============
+export interface BroadcastSlot {
+  id: number;
+  title: string;
+  description: string;
+  scheduled_at: string;
+  duration_min: number;
+  status: string;
+  share_url: string;
+  username: string | null;
+  display_name: string | null;
+  host_telegram_id: number | null;
+  countdown_sec: number;
+  is_soon: boolean;
+  is_live_now: boolean;
+}
+
+export async function getUpcomingSlots(): Promise<BroadcastSlot[]> {
+  const resp = await fetch(`${API_URL}/slots/upcoming`, { headers: authHeaders() });
+  if (!resp.ok) return [];
+  return resp.json();
+}
+
+// Vediushiyning o'z slotlari — GoLiveButton'da "bron qilinganmi?" holatini
+// ko'rsatish uchun (backend GET /slots/my — host_user_id = joriy user).
+export async function getMySlots(): Promise<BroadcastSlot[]> {
+  const resp = await fetch(`${API_URL}/slots/my`, { headers: authHeaders() });
+  if (!resp.ok) return [];
+  return resp.json();
+}
+
+export async function getAllSlots(): Promise<BroadcastSlot[]> {
+  const resp = await fetch(`${API_URL}/slots/`, { headers: authHeaders() });
+  if (!resp.ok) return [];
+  return resp.json();
+}
+
+export async function adminCreateSlot(data: {
+  host_user_id: number;
+  title: string;
+  description?: string;
+  scheduled_at: string;
+  duration_min?: number;
+}) {
+  const resp = await fetch(`${API_URL}/slots/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(data),
+  });
+  if (!resp.ok) {
+    const e = await resp.json().catch(() => ({}));
+    if (typeof e.detail === 'string') throw new Error(e.detail);
+    if (e.detail?.error === 'insufficient_points') {
+      throw new Error(`У ведущего недостаточно поинтов для слота (нужно ${e.detail.required}, есть ${e.detail.points})`);
+    }
+    throw new Error('Failed to create slot');
+  }
+  return resp.json();
+}
+
+export async function adminUpdateSlotStatus(slotId: number, status: string) {
+  const resp = await fetch(`${API_URL}/slots/${slotId}/status`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ status }),
+  });
+  if (!resp.ok) throw new Error('Failed');
+  return resp.json();
+}
+
+export async function adminDeleteSlot(slotId: number) {
+  const resp = await fetch(`${API_URL}/slots/${slotId}`, {
+    method: 'DELETE', headers: authHeaders(),
+  });
+  if (!resp.ok) throw new Error('Failed');
+  return resp.json();
+}
+
+// ============ Guruhlar (ведущий yaratadi) ============
+export async function getRooms(): Promise<ChatRoom[]> {
+  const resp = await fetch(`${API_URL}/rooms`, { headers: authHeaders(), cache: 'no-store' });
+  if (!resp.ok) throw new Error('Failed to fetch rooms');
+  return resp.json();
+}
+
+export async function createRoom(title: string, description: string): Promise<ChatRoom> {
+  const resp = await fetch(`${API_URL}/rooms`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ title, description }),
+  });
+  if (!resp.ok) {
+    const e = await resp.json().catch(() => ({}));
+    throw new Error(e.detail || 'Failed to create room');
+  }
+  return resp.json();
+}
+
+export async function closeRoom(roomId: number) {
+  const resp = await fetch(`${API_URL}/rooms/${roomId}/close`, {
+    method: 'POST', headers: authHeaders(),
+  });
+  if (!resp.ok) throw new Error('Failed to close room');
+  return resp.json();
+}
+
+// To'liq o'chirish — qaytarib bo'lmaydi, closeRoom'dan farqli (u faqat
+// yashiradi). Xabarlar tarixi ham CASCADE bilan ketadi.
+export async function deleteRoom(roomId: number) {
+  const resp = await fetch(`${API_URL}/rooms/${roomId}`, {
+    method: 'DELETE', headers: authHeaders(),
+  });
+  if (!resp.ok) throw new Error('Failed to delete room');
+  return resp.json();
+}
+
+export async function getRoomMessages(roomId: number): Promise<ChatMessage[]> {
+  const resp = await fetch(`${API_URL}/rooms/${roomId}/messages`, { headers: authHeaders(), cache: 'no-store' });
+  if (!resp.ok) {
+    // status prikrepiladi — RoomChatModal buni ishlatib, guruhdan chetlatilgan
+    // (403) foydalanuvchini avtomatik chiqarib yuboradi (kutilmagan xato emas).
+    const err: any = new Error('Failed to fetch room messages');
+    err.status = resp.status;
+    throw err;
+  }
+  return resp.json();
+}
+
+export interface RoomMember {
+  user_id: number;
+  telegram_id: number;
+  username: string | null;
+  display_name: string | null;
+  is_host: boolean;
+}
+
+export async function getRoomMembers(roomId: number): Promise<RoomMember[]> {
+  const resp = await fetch(`${API_URL}/rooms/${roomId}/members`, { headers: authHeaders(), cache: 'no-store' });
+  if (!resp.ok) throw new Error('Failed to fetch room members');
+  return resp.json();
+}
+
+// identifier — Telegram ID (raqam) yoki @username, ikkalasi ham mumkin.
+export async function inviteToRoom(roomId: number, identifier: string) {
+  const resp = await fetch(`${API_URL}/rooms/${roomId}/invite`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ identifier }),
+  });
+  if (!resp.ok) {
+    const e = await resp.json().catch(() => ({}));
+    throw new Error(typeof e.detail === 'string' ? e.detail : 'Failed to invite user');
+  }
+  return resp.json();
+}
+
+export async function kickFromRoom(roomId: number, userId: number) {
+  const resp = await fetch(`${API_URL}/rooms/${roomId}/kick`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ user_id: userId }),
+  });
+  if (!resp.ok) {
+    const e = await resp.json().catch(() => ({}));
+    throw new Error(typeof e.detail === 'string' ? e.detail : 'Failed to remove user');
+  }
+  return resp.json();
+}
+
+export async function sendRoomMessage(roomId: number, message: string) {
+  const resp = await fetch(`${API_URL}/rooms/${roomId}/messages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ message }),
+  });
+  if (!resp.ok) {
+    const err: any = new Error('Failed to send room message');
+    err.status = resp.status;
+    throw err;
+  }
+  return resp.json();
+}
+
+export async function sendRoomVoice(roomId: number, audioBlob: Blob) {
+  const typeExtMap: Record<string, string> = {
+    'audio/mp4': 'm4a', 'audio/mpeg': 'mp3', 'audio/ogg': 'ogg', 'audio/webm': 'webm', 'audio/wav': 'wav',
+  };
+  const baseType = (audioBlob.type || 'audio/webm').split(';')[0];
+  const ext = typeExtMap[baseType] || 'webm';
+  const fd = new FormData();
+  fd.append('audio_file', audioBlob, `voice.${ext}`);
+  const resp = await fetch(`${API_URL}/rooms/${roomId}/voice`, {
+    method: 'POST', headers: authHeaders(), body: fd,
+  });
+  if (!resp.ok) {
+    const err: any = new Error('Failed to send room voice');
+    err.status = resp.status;
+    err.response = resp;
+    throw err;
+  }
+  return resp.json();
+}
+
+// ============ Music: admin moderation ============
+export async function adminDeleteNomination(nominationId: number) {
+  const resp = await fetch(`${API_URL}/music/nominations/${nominationId}`, {
+    method: 'DELETE', headers: authHeaders(),
+  });
+  if (!resp.ok) throw new Error('Failed to delete nomination');
+  return resp.json();
 }

@@ -1,14 +1,14 @@
-"""Uzluksiz Icecast oqimi — PERSISTENT FFmpeg (radiovышka rejimi).
+"""Uzluksiz MediaMTX oqimi — PERSISTENT FFmpeg (radiovышka rejimi).
 
 Eski muammo (size=0, uzilish):
-  Har segment/filler uchun YANGI ffmpeg ishga tushardi va Icecast mount'ga
+  Har segment/filler uchun YANGI ffmpeg ishga tushardi va mount'ga
   qayta-qayta ulanardi → "source already connected", uzilishlar, size=0.
 
 Yangi yechim (radiovышка):
   Har til (ru/lt/en) uchun BITTA doimiy ffmpeg jarayoni:
-    ffmpeg -re -f mp3 -i pipe:0  →  icecast://.../live_{lang}
+    ffmpeg -re -f mp3 -i pipe:0  →  rtmp://.../live_{lang}  (MediaMTX RTMP ingest)
   Mount BIR MARTA ulanadi va UZILMAYDI. Python writer pipe'ga uzluksiz
-  bir xil formatdagi (44100/stereo/128k) MP3 bayt yozadi:
+  bir xil formatdagi (44100/stereo/128k) audio bayt yozadi:
     - navbatда segment bo'lsa → segmentni shu formatga transcode qilib yozadi
     - navbat bo'sh bo'lsa → oldindan tayyorlangan jimlik bo'lagini yozadi
   -re va pipe backpressure tufayli yozish real-vaqtда sekinlashadi (mount tirik).
@@ -16,17 +16,21 @@ Yangi yechim (radiovышка):
 Jonli efir (mikrofon) uchun pause()/resume() — ru mount'ни vaqtincha bo'shatadi.
 """
 
-import os
 import asyncio
 import logging
+import os
 import subprocess
 
 log = logging.getLogger("continuous")
 
 USE_ICECAST = os.getenv("USE_ICECAST", "false").lower() == "true"
+USE_MEDIAMTX = os.getenv("USE_MEDIAMTX", "false").lower() == "true"
 ICECAST_HOST = os.getenv("ICECAST_HOST", "localhost")
 ICECAST_PORT = int(os.getenv("ICECAST_PORT", "8000"))
 ICECAST_PASS = os.getenv("ICECAST_PASS", "IcecastPass2025!")
+MEDIAMTX_HOST = os.getenv("MEDIAMTX_HOST", "localhost")
+MEDIAMTX_RTMP_PORT = int(os.getenv("MEDIAMTX_RTMP_PORT", "1935"))
+MEDIAMTX_PUBLISH_PASS = os.getenv("MEDIAMTX_PUBLISH_PASS", "MediaMTXPass2025!")
 AUDIO_DIR = os.getenv("AUDIO_DIR", "/app/audio")
 
 LANGS = ("ru", "lt", "en")
@@ -35,14 +39,23 @@ LANGS = ("ru", "lt", "en")
 SAMPLE_RATE = 44100
 CHANNELS = 2
 BITRATE = "128k"
-SILENCE_CHUNK_SEC = 2.0      # bo'sh paytda yoziladigan jimlik bo'lagi uzunligi
-PIPE_BLOCK = 16384           # pipe'ga blok-blok yozish (pauza'ni tez sezish uchun)
+SILENCE_CHUNK_SEC = 2.0  # bo'sh paytda yoziladigan jimlik bo'lagi uzunligi
+DEFAULT_MUSIC_CHUNK_SEC = 4.0  # default musiqa qanday bo'laklarga bo'linadi
+PIPE_BLOCK = 16384  # pipe'ga blok-blok yozish (pauza'ni tez sezish uchun)
 
 _queues: dict[str, asyncio.Queue] = {}
 _workers: dict[str, asyncio.Task] = {}
 _procs: dict[str, subprocess.Popen] = {}
 _started = False
 _silence_mp3: bytes = b""
+
+# Navbat bo'sh bo'lganda jimlik o'rniga aylanadigan "default musiqa" —
+# admin yuklaydi (Music tab). Bo'laklarga bo'lib xotirada saqlanadi, har
+# til mustaqil pozitsiyadan aylantiradi (segment/jonli efir orasida
+# to'xtagan joyidan davom etadi, chunki pozitsiya faqat shu bo'lak
+# haqiqatan efirga chiqqanda oshiriladi).
+_default_chunks: list[bytes] = []
+_default_idx: dict[str, int] = {}
 
 _paused: dict[str, bool] = {}
 
@@ -60,20 +73,40 @@ def is_paused(lang: str) -> bool:
     return _paused.get(lang, False)
 
 
+def is_stream_closed(lang: str) -> bool:
+    """pause() dan keyin worker chindan ham ffmpeg'ni yopib, mount'ni
+    bo'shatganini tekshiradi — chaqiruvchi shu True bo'lgunча kutishi
+    kerak, aks holda yangi (jonli mikrofon) ffmpeg eski bilan bir xil
+    mount'ga bir vaqtda ulanishga urinadi ("source already connected"
+    yoki bir necha soniyadan keyin uzilib qoladigan noaniq holat)."""
+    return lang not in _procs
+
+
 def _ffmpeg_bin() -> str:
     from shutil import which
+
     sys_ff = which("ffmpeg")
     if sys_ff:
         return sys_ff
     try:
         import imageio_ffmpeg
+
         return imageio_ffmpeg.get_ffmpeg_exe()
     except Exception:
         return "ffmpeg"
 
 
-def _icecast_url(lang: str) -> str:
-    return f"icecast://source:{ICECAST_PASS}@{ICECAST_HOST}:{ICECAST_PORT}/live_{lang}"
+def _target_url(lang: str) -> str:
+    """Chiqish manzili — Icecast (USE_ICECAST ustuvor) yoki MediaMTX."""
+    if USE_ICECAST:
+        return f"icecast://source:{ICECAST_PASS}@{ICECAST_HOST}:{ICECAST_PORT}/live_{lang}"
+    # MediaMTX internal auth RTMP orqali userinfo (user:pass@host) emas,
+    # query-parametr sifatida keladi: ?user=&pass=
+    # https://mediamtx.org/docs/features/authentication
+    return (
+        f"rtmp://{MEDIAMTX_HOST}:{MEDIAMTX_RTMP_PORT}/live_{lang}"
+        f"?user=publisher&pass={MEDIAMTX_PUBLISH_PASS}"
+    )
 
 
 def enqueue(lang: str, mp3_path: str) -> bool:
@@ -96,12 +129,31 @@ def enqueue_multilang(paths: dict[str, str]) -> None:
 async def _gen_silence() -> bytes:
     """Bir marta ~2s jimlik MP3 (yagona format) generatsiya qiladi."""
     cmd = [
-        _ffmpeg_bin(), "-hide_banner", "-loglevel", "error",
-        "-f", "lavfi", "-i", f"anullsrc=r={SAMPLE_RATE}:cl=stereo",
-        "-t", str(SILENCE_CHUNK_SEC),
-        "-c:a", "libmp3lame", "-b:a", BITRATE, "-ar", str(SAMPLE_RATE), "-ac", str(CHANNELS),
-        "-write_xing", "0", "-id3v2_version", "0",
-        "-f", "mp3", "pipe:1",
+        _ffmpeg_bin(),
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        f"anullsrc=r={SAMPLE_RATE}:cl=stereo",
+        "-t",
+        str(SILENCE_CHUNK_SEC),
+        "-c:a",
+        "libmp3lame",
+        "-b:a",
+        BITRATE,
+        "-ar",
+        str(SAMPLE_RATE),
+        "-ac",
+        str(CHANNELS),
+        "-write_xing",
+        "0",
+        "-id3v2_version",
+        "0",
+        "-f",
+        "mp3",
+        "pipe:1",
     ]
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
@@ -116,11 +168,27 @@ async def _transcode_uniform(mp3_path: str) -> bytes:
     Shu tufayli persistent ffmpeg pipe'da format sakramaydi → dekoder buzilmaydi.
     """
     cmd = [
-        _ffmpeg_bin(), "-hide_banner", "-loglevel", "error",
-        "-i", mp3_path,
-        "-c:a", "libmp3lame", "-b:a", BITRATE, "-ar", str(SAMPLE_RATE), "-ac", str(CHANNELS),
-        "-write_xing", "0", "-id3v2_version", "0",
-        "-f", "mp3", "pipe:1",
+        _ffmpeg_bin(),
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        mp3_path,
+        "-c:a",
+        "libmp3lame",
+        "-b:a",
+        BITRATE,
+        "-ar",
+        str(SAMPLE_RATE),
+        "-ac",
+        str(CHANNELS),
+        "-write_xing",
+        "0",
+        "-id3v2_version",
+        "0",
+        "-f",
+        "mp3",
+        "pipe:1",
     ]
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
@@ -129,13 +197,110 @@ async def _transcode_uniform(mp3_path: str) -> bytes:
     return data or b""
 
 
+async def load_default_music(path: str) -> bool:
+    """Admin yuklagan faylni DEFAULT_MUSIC_CHUNK_SEC'lik bir xil formatdagi
+    bo'laklarga bo'lib xotirada saqlaydi (fayl darajasida emas — shu
+    tufayli navbatga yozishda _transcode_uniform kabi har safar butun
+    faylni qayta kodlash shart emas). Muvaffaqiyatsiz bo'lsa eski
+    holat (agar bo'lsa) saqlanib qoladi, jimlikka tushib qolmaydi shart emas.
+    """
+    import glob
+    import tempfile
+
+    if not os.path.isfile(path):
+        log.warning("[continuous] default music fayl topilmadi: %s", path)
+        return False
+
+    with tempfile.TemporaryDirectory() as tmp:
+        pattern = os.path.join(tmp, "chunk_%04d.mp3")
+        cmd = [
+            _ffmpeg_bin(),
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            path,
+            "-c:a",
+            "libmp3lame",
+            "-b:a",
+            BITRATE,
+            "-ar",
+            str(SAMPLE_RATE),
+            "-ac",
+            str(CHANNELS),
+            "-write_xing",
+            "0",
+            "-id3v2_version",
+            "0",
+            "-f",
+            "segment",
+            "-segment_time",
+            str(DEFAULT_MUSIC_CHUNK_SEC),
+            pattern,
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+        )
+        await proc.wait()
+
+        chunk_paths = sorted(glob.glob(os.path.join(tmp, "chunk_*.mp3")))
+        if not chunk_paths:
+            log.warning("[continuous] default music: ffmpeg bo'laklarga bo'lolmadi (%s)", path)
+            return False
+
+        chunks: list[bytes] = []
+        for p in chunk_paths:
+            with open(p, "rb") as f:
+                data = f.read()
+            if data:
+                chunks.append(data)
+
+    if not chunks:
+        return False
+
+    global _default_chunks
+    _default_chunks = chunks
+    for lang in LANGS:
+        _default_idx[lang] = 0
+    log.info("[continuous] default music yuklandi: %d bo'lak", len(chunks))
+    return True
+
+
+def clear_default_music() -> None:
+    global _default_chunks
+    _default_chunks = []
+    _default_idx.clear()
+
+
+def has_default_music() -> bool:
+    return bool(_default_chunks)
+
+
 def _spawn_ffmpeg(lang: str) -> subprocess.Popen:
-    """Til uchun DOIMIY ffmpeg: pipe:0 (mp3) → Icecast mount. Bir marta ulanadi."""
+    """Til uchun DOIMIY ffmpeg: pipe:0 (mp3) → Icecast/MediaMTX mount. Bir marta ulanadi."""
+    if USE_ICECAST:
+        # Kirish allaqachon mp3 — qayta kodlashsiz to'g'ridan-to'g'ri Icecast'ga
+        encode_args = [
+            "-c:a", "copy", "-content_type", "audio/mpeg", "-f", "mp3",
+        ]
+    else:
+        encode_args = [
+            "-c:a", "aac", "-b:a", BITRATE,
+            "-ar", str(SAMPLE_RATE), "-ac", str(CHANNELS),
+            "-f", "flv",
+        ]
     cmd = [
-        _ffmpeg_bin(), "-hide_banner", "-loglevel", "error",
-        "-re", "-f", "mp3", "-i", "pipe:0",
-        "-c:a", "libmp3lame", "-b:a", BITRATE, "-ar", str(SAMPLE_RATE), "-ac", str(CHANNELS),
-        "-content_type", "audio/mpeg", "-f", "mp3", _icecast_url(lang),
+        _ffmpeg_bin(),
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-re",
+        "-f",
+        "mp3",
+        "-i",
+        "pipe:0",
+        *encode_args,
+        _target_url(lang),
     ]
     return subprocess.Popen(
         cmd,
@@ -146,7 +311,7 @@ def _spawn_ffmpeg(lang: str) -> subprocess.Popen:
 
 
 def _close_proc(lang: str) -> None:
-    proc = _procs.pop(lang, None)
+    proc = _procs.get(lang)
     if proc is None:
         return
     try:
@@ -162,6 +327,11 @@ def _close_proc(lang: str) -> None:
             proc.kill()
         except Exception:
             pass
+    # Faqat jarayon HAQIQATAN o'lgandan keyin ro'yxatdan o'chiramiz —
+    # is_stream_closed() shu daqiqadan boshlab mount haqiqatan bo'sh
+    # ekanini ishonchli bildirsin (jonli mikrofon ffmpeg'i shu signalga
+    # tayanib icecast/mediamtx'ga ulanadi).
+    _procs.pop(lang, None)
 
 
 async def _write_blocks(lang: str, data: bytes) -> bool:
@@ -176,13 +346,24 @@ async def _write_blocks(lang: str, data: bytes) -> bool:
     for i in range(0, len(mv), PIPE_BLOCK):
         if _paused.get(lang, False):
             return False
-        block = mv[i:i + PIPE_BLOCK]
+        block = mv[i : i + PIPE_BLOCK]
         try:
             await asyncio.to_thread(proc.stdin.write, block)
             await asyncio.to_thread(proc.stdin.flush)
         except (BrokenPipeError, OSError, ValueError):
             return False
     return True
+
+
+def _next_filler(lang: str) -> bytes:
+    """Navbat bo'sh bo'lganda nima chalinishi kerak — default musiqa
+    o'rnatilgan bo'lsa navbatdagi bo'lak (pozitsiya shu tilda oshiriladi,
+    boshqa til/segment unga ta'sir qilmaydi), aks holda jimlik."""
+    if not _default_chunks:
+        return _silence_mp3
+    idx = _default_idx.get(lang, 0) % len(_default_chunks)
+    _default_idx[lang] = (idx + 1) % len(_default_chunks)
+    return _default_chunks[idx]
 
 
 async def _worker(lang: str) -> None:
@@ -203,7 +384,9 @@ async def _worker(lang: str) -> None:
             proc = _procs.get(lang)
             if proc is None or proc.poll() is not None:
                 if proc is not None and proc.poll() is not None:
-                    log.warning("[continuous] %s ffmpeg o'ldi (rc=%s), qayta ochamiz", lang, proc.poll())
+                    log.warning(
+                        "[continuous] %s ffmpeg o'ldi (rc=%s), qayta ochamiz", lang, proc.poll()
+                    )
                 _close_proc(lang)
                 _procs[lang] = _spawn_ffmpeg(lang)
                 await asyncio.sleep(0.2)
@@ -219,9 +402,9 @@ async def _worker(lang: str) -> None:
                     else:
                         log.info("[continuous] %s segment efirga: %s", lang, os.path.basename(mp3))
                 else:
-                    data = _silence_mp3
+                    data = _next_filler(lang)
             except asyncio.QueueEmpty:
-                data = _silence_mp3
+                data = _next_filler(lang)
 
             ok = await _write_blocks(lang, data)
             if not ok and not _paused.get(lang, False):
@@ -245,7 +428,7 @@ def is_running() -> bool:
 async def start() -> None:
     """Barcha tillar uchun persistent oqim worker'larini ishga tushiradi."""
     global _started, _silence_mp3
-    if _started or not USE_ICECAST:
+    if _started or not (USE_ICECAST or USE_MEDIAMTX):
         return
 
     _silence_mp3 = await _gen_silence()
@@ -260,6 +443,18 @@ async def start() -> None:
         _workers[lang] = asyncio.create_task(_worker(lang))
     _started = True
     log.info("[continuous] Persistent multiyazык oqim ishga tushdi (ru/lt/en)")
+
+    # Admin oldin default musiqa o'rnatgan bo'lsa — har deploy/restart'dan
+    # keyin ham qayta tiklaymiz (app_settings'da saqlanadi).
+    try:
+        from app.core.database import db
+
+        path = await db.fetchval("SELECT value FROM app_settings WHERE key = 'default_music_path'")
+        if path:
+            ok = await load_default_music(path)
+            log.info("[continuous] default music tiklandi: %s (%s)", path, "ok" if ok else "xato")
+    except Exception as exc:
+        log.warning("[continuous] default music tiklab bo'lmadi: %s", exc)
 
 
 async def stop() -> None:

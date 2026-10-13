@@ -35,11 +35,24 @@ services:
         limits:
           memory: 192M
 
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    restart: unless-stopped
+    ports:
+      - "1935:1935"   # RTMP ingest (ffmpeg push)
+      - "8888:8888"   # HLS delivery (tinglovchilar to'g'ridan ulanadi)
+    environment:
+      # MediaMTX o'z mediamtx.yml ichidagi ${VAR}ni substitutsiya qilmaydi —
+      # parol shu MTX_ prefiksli env orqali beriladi (pozitsion index: 0-user).
+      MTX_AUTHINTERNALUSERS_0_PASS: ${MEDIAMTX_PUBLISH_PASS:-MediaMTXPass2025!}
+    volumes:
+      - ./infra/mediamtx/mediamtx.yml:/mediamtx.yml:ro
+
   icecast:
     image: moul/icecast
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "8000:8000"   # jonli efir manbai — backend /radio/live/{lang} orqali proksi qiladi
     volumes:
       - ./infra/icecast/icecast.xml:/etc/icecast2/icecast.xml:ro
 
@@ -55,6 +68,7 @@ services:
       DB_HOST: postgres
       DB_PORT: 5432
       REDIS_URL: redis://redis:6379/0
+      MEDIAMTX_HOST: mediamtx
       ICECAST_HOST: icecast
       MINIAPP_DIR: /app/frontend
     volumes:

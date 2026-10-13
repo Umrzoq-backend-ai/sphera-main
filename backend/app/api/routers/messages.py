@@ -1,21 +1,21 @@
+import asyncio
 import os
 import uuid
-import asyncio
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 from app.core.database import db
+from app.core.dependencies import get_current_user
 from app.core.models import (
-    TextMessageRequest,
     MessageResponse,
     PsychotypeOut,
+    TextMessageRequest,
 )
-from app.core.dependencies import get_current_user
 from app.core.state import VALID_CITIES
-from app.services import whisper_stt, psychotype, points
 from app.core.ws_manager import manager
+from app.services import points, psychotype, whisper_stt
 
 router = APIRouter(prefix="/messages", tags=["messages"])
 
@@ -70,13 +70,16 @@ async def _award_and_notify(user: dict, event_type: str, amount: int, city: str)
     return result
 
 
-async def _process_voice_background(path: str, user_id: int, city: str, lang: str | None, to_studio: bool):
+async def _process_voice_background(
+    path: str, user_id: int, city: str, lang: str | None, to_studio: bool
+):
     """Фон: для студии — STT + психотип (для ИИ/модератора).
 
     TZ v2.0: аудиофайл СОХРАНЯЕТСЯ (audio_file_path), чтобы голос можно было
     прослушать в чате (как в Telegram). Для чата STT не нужен.
     """
     import logging
+
     log = logging.getLogger("messages.voice_bg")
 
     if not to_studio:
@@ -96,7 +99,11 @@ async def _process_voice_background(path: str, user_id: int, city: str, lang: st
                 INSERT INTO messages (user_id, city, text, audio_path, status, is_for_studio, lang)
                 VALUES ($1, $2, $3, $4, 'pending', true, $5)
                 """,
-                user_id, city, transcript.strip(), os.path.basename(path), lang,
+                user_id,
+                city,
+                transcript.strip(),
+                os.path.basename(path),
+                lang,
             )
             analysis = await psychotype.analyze(transcript)
             await _save_psychotype(user_id, analysis)
@@ -108,7 +115,7 @@ async def _process_voice_background(path: str, user_id: int, city: str, lang: st
 async def voice_message(
     city: str = Form(...),
     audio_file: UploadFile = File(...),
-    destination: str = Form("studio"),   # "chat" | "studio"
+    destination: str = Form("studio"),  # "chat" | "studio"
     lang: str = Form(None),
     user: dict = Depends(get_current_user),
 ):
@@ -152,27 +159,37 @@ async def voice_message(
         INSERT INTO chat_messages (user_id, city, message, message_type, audio_file_path)
         VALUES ($1, $2, $3, $4, $5)
         """,
-        user["id"], city, label, mtype, filename,
+        user["id"],
+        city,
+        label,
+        mtype,
+        filename,
     )
-    await manager.broadcast(city, {
-        "type": "chat",
-        "data": {
-            "username": username,
-            "voice_url": voice_url,
-            "message": label,
-            "kind": mtype,
-            "message_type": mtype,
-            "created_at": datetime.utcnow().isoformat(),
+    await manager.broadcast(
+        city,
+        {
+            "type": "chat",
+            "data": {
+                "username": username,
+                "voice_url": voice_url,
+                "message": label,
+                "kind": mtype,
+                "message_type": mtype,
+                "created_at": datetime.utcnow().isoformat(),
+            },
         },
-    })
+    )
 
     _lang = lang if lang in ("ru", "lt", "en") else None
     # STT в фоне + авто-удаление; в студию — попадает в очередь модератора/ИИ
     asyncio.create_task(_process_voice_background(path, user["id"], city, _lang, to_studio))
 
     return MessageResponse(
-        transcript=None, psychotype=None, ai_reply=None,
-        voice_url=voice_url, points=str(spent["points"]),
+        transcript=None,
+        psychotype=None,
+        ai_reply=None,
+        voice_url=voice_url,
+        points=str(spent["points"]),
     )
 
 
@@ -184,84 +201,6 @@ async def get_voice(filename: str):
     if not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="Voice expired")
     return FileResponse(path, media_type="audio/webm")
-
-
-# Ruxsat etilgan fayl turlari (TZ: fayl yuborish — Telegram uslubi)
-ALLOWED_FILE_EXT = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".pdf",
-                    ".mp3", ".ogg", ".wav", ".m4a", ".mp4", ".webm",
-                    ".doc", ".docx", ".txt", ".zip"}
-MAX_FILE_MB = 20
-
-
-@router.post("/file", response_model=MessageResponse)
-async def file_message(
-    city: str = Form(...),
-    file: UploadFile = File(...),
-    user: dict = Depends(get_current_user),
-):
-    """Fayl yuborish (rasm/hujjat/audio) — jonli chatga (Telegram uslubi).
-
-    Chatда saqlanadi (message_type=file, audio_file_path=fayl nomi).
-    """
-    if city not in VALID_CITIES and VALID_CITIES:
-        pass  # keng qabul
-
-    ext = os.path.splitext(file.filename or "")[1].lower()
-    if ext not in ALLOWED_FILE_EXT:
-        raise HTTPException(status_code=400, detail="Unsupported file type")
-
-    content = await file.read()
-    if len(content) > MAX_FILE_MB * 1024 * 1024:
-        raise HTTPException(status_code=400, detail=f"File too large (max {MAX_FILE_MB}MB)")
-
-    # Chat fayl uchun limit (chat narxi)
-    spent = await points.spend(user["id"], "chat", points.COST["chat"])
-    if not spent["ok"]:
-        raise HTTPException(
-            status_code=402,
-            detail={"error": "insufficient_points", "points": str(spent["points"])},
-        )
-
-    stored = f"{uuid.uuid4().hex}{ext}"
-    path = os.path.join(UPLOAD_DIR, stored)
-    with open(path, "wb") as f:
-        f.write(content)
-
-    orig = os.path.basename(file.filename or "file")
-    username = user["username"] or user["full_name"] or f"id{user['telegram_id']}"
-    label = f"📎 {orig}"
-    await db.execute(
-        """
-        INSERT INTO chat_messages (user_id, city, message, message_type, audio_file_path)
-        VALUES ($1, $2, $3, 'file', $4)
-        """,
-        user["id"], city, label, stored,
-    )
-    file_url = f"/messages/file/{stored}"
-    await manager.broadcast(city, {
-        "type": "chat",
-        "data": {
-            "username": username,
-            "message": label,
-            "file_url": file_url,
-            "file_name": orig,
-            "kind": "file",
-            "message_type": "file",
-            "created_at": datetime.utcnow().isoformat(),
-        },
-    })
-    return MessageResponse(transcript=None, psychotype=None, ai_reply=None,
-                           voice_url=file_url, points=str(spent["points"]))
-
-
-@router.get("/file/{filename}")
-async def get_file(filename: str):
-    """Yuborilgan faylni olish."""
-    safe = os.path.basename(filename)
-    path = os.path.join(UPLOAD_DIR, safe)
-    if not os.path.isfile(path):
-        raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(path)
 
 
 @router.post("/text", response_model=MessageResponse)
@@ -302,7 +241,10 @@ async def text_message(
     pt = await _save_psychotype(user["id"], analysis)
 
     return MessageResponse(
-        transcript=None, psychotype=pt, ai_reply=None, points=str(spent["points"]),
+        transcript=None,
+        psychotype=pt,
+        ai_reply=None,
+        points=str(spent["points"]),
     )
 
 

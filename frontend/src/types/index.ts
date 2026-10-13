@@ -5,7 +5,7 @@ export interface User {
   username: string | null;
   display_name?: string | null;
   full_name?: string | null;
-  role: 'listener' | 'broadcaster' | 'admin' | 'slusatel' | 'aktivniy' | 'doverenniy';
+  role: 'listener' | 'broadcaster' | 'admin' | 'moderator' | 'slusatel' | 'aktivniy' | 'doverenniy';
   points: number;
   level?: number;
   level_name?: string;
@@ -43,7 +43,44 @@ export interface PointPackage {
   id: number;
   points_amount: number;
   price_eur: number;
+  price_stars: number;
   label: string;
+}
+
+// Point tranzaksiyasi (tarix)
+export interface PointsTransaction {
+  id: number;
+  amount: number;
+  event_type: string;
+  description: string;
+  created_at: string;
+}
+
+// To'lov sozlamalari (admin belgilaydi — poinт uchun qanday to'lanadi)
+export interface PaymentSettings {
+  method: 'stars' | 'manual';
+  instructions: string;
+}
+
+// Guruh (ведущий yaratadi)
+export interface ChatRoom {
+  id: number;
+  title: string;
+  description: string;
+  host_user_id: number | null;
+  host_display_name: string | null;
+  is_active: boolean;
+  created_at: string;
+}
+
+// Point paketi (admin CRUD)
+export interface AdminPackage {
+  id: number;
+  points_amount: number;
+  price_eur: number;
+  price_stars: number;
+  label: string;
+  is_active: boolean;
 }
 
 // Yangilik
@@ -69,6 +106,9 @@ export interface ChatMessage {
   duration_sec?: number | null;
   kind?: 'chat' | 'studio' | 'ai';
   created_at: string;
+  // Faqat shu sessiyada optimistik yuborilgan xabarlarda bo'ladi (Telegram
+  // uslubidagi bitta/ikkita galochka) — tarixdan yuklangan xabarlarda yo'q.
+  status?: 'sending' | 'sent' | 'delivered';
 }
 
 // Radio Status
@@ -76,6 +116,7 @@ export interface RadioStatus {
   is_live: boolean;
   broadcaster_type: string | null;
   broadcaster_name: string | null;
+  use_hls?: boolean;
   use_icecast?: boolean;
   stream_url?: string | null;
   listeners_count?: number;
@@ -124,6 +165,9 @@ export type WSMessageType =
   | 'limit_exceeded'
   | 'studio_denied'
   | 'balance'
+  | 'points_update'
+  | 'role_updated'
+  | 'casting_updated'
   | 'error'
   | 'pong'
   | 'ping';
@@ -134,6 +178,6 @@ export interface WSMessage {
 }
 
 // Navigation
-export type Screen = 'anons' | 'efir' | 'profile' | 'stats' | 'favorites';
+export type Screen = 'anons' | 'efir' | 'profile' | 'stats' | 'music' | 'schedule' | 'casting';
 
 export type { Language } from '../locales';

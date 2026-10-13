@@ -1,4 +1,5 @@
 import { useState, useRef } from 'react';
+import { Check, CheckCheck, Clock, Play, Pause, AlertTriangle, Music2, Download, Paperclip } from 'lucide-react';
 import { API_URL } from '../../lib/config';
 import { useTranslation } from '../../hooks/useTranslation';
 import type { ChatMessage, User } from '../../types';
@@ -23,13 +24,18 @@ export function ChatMessage({ message, currentUser }: ChatMessageProps) {
   else if (isMine) messageClass += ' justify-end';
   else messageClass += ' justify-start';
 
-  let bubbleClass = 'max-w-[80%] px-3 py-2 rounded-2xl';
+  // Наклейки под лёгким углом — "приклеены" в чат, а не ровные пилюли.
+  // Знак чередуется по id сообщения, чтобы соседние пузыри не были
+  // зеркально одинаковыми (не рандом на каждый рендер — стабильно по id).
+  const tilt = (message.id % 2 === 0 ? 1 : -1) * (1 + (message.id % 3));
+
+  let bubbleClass = 'max-w-[80%] px-3 py-2 border-2';
   if (isAI) {
-    bubbleClass += ' bg-[rgba(56,225,255,0.1)] border border-dashed border-[#38e1ff] text-center max-w-[92%]';
+    bubbleClass += ' rift-halftone rift-torn-b bg-[rgba(167,139,250,0.12)] border-dashed border-[var(--ai)] text-center max-w-[92%]';
   } else if (isMine) {
-    bubbleClass += ' bg-gradient-to-br from-[#2ea8ff] to-[#38e1ff] text-[#02101f] rounded-br-sm';
+    bubbleClass += ' rift-torn-a bg-gradient-to-br from-[var(--accent-light)] to-[var(--accent)] border-[var(--text)] text-[#0d0e11] shadow-[3px_3px_0_rgba(0,0,0,0.3)]';
   } else {
-    bubbleClass += ' bg-[rgba(46,168,255,0.12)] border border-[var(--glass-border)] rounded-bl-sm';
+    bubbleClass += ' rift-torn-c bg-[rgba(251,146,60,0.12)] border-[var(--glass-border)] shadow-[3px_3px_0_rgba(0,0,0,0.22)]';
   }
 
   const renderContent = () => {
@@ -44,23 +50,36 @@ export function ChatMessage({ message, currentUser }: ChatMessageProps) {
 
   return (
     <div className={messageClass}>
-      <div className={bubbleClass}>
+      <div className={bubbleClass} style={isAI ? undefined : { transform: `rotate(${tilt}deg)` }}>
         {!isMine && !isAI && (
-          <div className="text-[11px] font-bold text-[#38e1ff] mb-0.5">
+          <div className="text-[11px] font-bold text-[var(--accent-light)] mb-0.5">
             {message.username || t('guest')}
           </div>
         )}
         {renderContent()}
-        <div className={`text-[10px] text-right mt-0.5 ${isMine ? 'text-[rgba(2,16,31,0.6)]' : 'text-[#6b7c9e]'}`}>
+        <div className={`flex items-center justify-end gap-1 text-[10px] mt-0.5 ${isMine ? 'text-[rgba(23,24,28,0.65)]' : 'text-[var(--muted)]'}`}>
           {time}
+          {isMine && message.status && <StatusTicks status={message.status} />}
         </div>
       </div>
     </div>
   );
 }
 
+// Telegram uslubidagi galochkalar — faqat shu sessiyada yuborilgan xabarlar
+// uchun (status maydoni bo'lgan xabarlarda). "Delivered" WS orqali xabar
+// serverdan qaytib kelganini bildiradi (haqiqiy "o'qildi" holati emas —
+// guruh chatida bittalab o'qilganlikni kuzatish yo'q).
+function StatusTicks({ status }: { status: 'sending' | 'sent' | 'delivered' }) {
+  if (status === 'sending') return <Clock className="w-3 h-3 shrink-0" />;
+  if (status === 'delivered') return <CheckCheck className="w-3.5 h-3.5 shrink-0" />;
+  return <Check className="w-3.5 h-3.5 shrink-0" />;
+}
+
 function VoicePlayer({ url, duration, voiceLabel }: { url: string; duration: number | null; voiceLabel: string }) {
-  const fullUrl = url.startsWith('http') ? url : `${API_URL}${url}`;
+  // blob: — hali serverga yuklanmagan, optimistik ko'rsatilayotgan ovoz
+  // (mahalliy URL, o'zgartirmasdan ishlatiladi).
+  const fullUrl = url.startsWith('http') || url.startsWith('blob:') ? url : `${API_URL}${url}`;
   const [playing, setPlaying] = useState(false);
   const [failed, setFailed] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -90,18 +109,18 @@ function VoicePlayer({ url, duration, voiceLabel }: { url: string; duration: num
     <div className="flex items-center gap-2.5 min-w-[130px]">
       <button
         onClick={handlePlay}
-        className={`w-8 h-8 rounded-full flex items-center justify-center text-[13px] ${
-          failed ? 'bg-[#ff4d6d] text-white' : 'bg-[rgba(2,16,31,0.25)]'
+        className={`w-8 h-8 rounded-full flex items-center justify-center ${
+          failed ? 'bg-[var(--danger)] text-white' : 'bg-[rgba(23,24,28,0.3)]'
         }`}
       >
-        {failed ? '!' : playing ? '❚❚' : '▶'}
+        {failed ? <AlertTriangle className="w-3.5 h-3.5" /> : playing ? <Pause className="w-3.5 h-3.5" fill="currentColor" /> : <Play className="w-3.5 h-3.5 ml-0.5" fill="currentColor" />}
       </button>
-      <span className="text-xs opacity-85">
-        🎵 {duration ? `${duration}ʺ` : voiceLabel}
+      <span className="text-xs opacity-85 flex items-center gap-1">
+        <Music2 className="w-3 h-3" /> {duration ? `${duration}ʺ` : voiceLabel}
       </span>
       {failed && (
-        <a href={fullUrl} target="_blank" rel="noopener noreferrer" className="text-[11px] underline text-white">
-          ⬇
+        <a href={fullUrl} target="_blank" rel="noopener noreferrer" className="text-white">
+          <Download className="w-3.5 h-3.5" />
         </a>
       )}
     </div>
@@ -119,10 +138,10 @@ function FileAttachment({ url, name, isMine }: { url: string; name: string; isMi
       rel="noopener noreferrer"
       className="flex items-center gap-2 min-w-[120px] no-underline"
     >
-      <div className={`w-[30px] h-[30px] rounded-lg flex items-center justify-center text-[15px] flex-shrink-0 ${
-        isMine ? 'bg-[rgba(2,16,31,0.2)]' : 'bg-[var(--accent)] text-[#02101f]'
+      <div className={`w-[30px] h-[30px] rounded-lg flex items-center justify-center flex-shrink-0 ${
+        isMine ? 'bg-[rgba(23,24,28,0.25)]' : 'bg-[var(--accent)] text-[#0d0e11]'
       }`}>
-        📎
+        <Paperclip className="w-3.5 h-3.5" />
       </div>
       <span className="text-[13px] underline break-all">{fileName}</span>
     </a>

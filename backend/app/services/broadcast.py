@@ -1,29 +1,68 @@
-"""Broadcast_Service — jonli efir (PDF: WebSocket → Icecast).
+"""Broadcast_Service — jonli efir (WebSocket → Icecast yoki MediaMTX RTMP).
 
 Doverenniy mikrofon audiosini (webm/opus chunks) WebSocket orqali oladi,
-FFmpeg subprocess stdin'ga yozadi, FFmpeg uni Icecast mountpoint'ga uzatadi.
-Butun guruh shu mountpoint'ni tinglaydi.
+FFmpeg subprocess stdin'ga yozadi, FFmpeg uni Icecast/MediaMTX mountpoint'ga
+uzatadi. Butun guruh shu mountpoint'ni tinglaydi.
 
-USE_ICECAST=false (dev) bo'lsa — jonli efir mavjud emas (AI playlist ishlaydi).
+USE_ICECAST=true bo'lsa — Icecast (MP3, past kechikish) ishlatiladi.
+Aks holda USE_MEDIAMTX=true bo'lsa — MediaMTX (AAC/RTMP→HLS) ishlatiladi.
+Ikkalasi ham false (dev) bo'lsa — jonli efir mavjud emas (AI playlist ishlaydi).
 """
 
+import logging
 import os
 import subprocess
+import threading
+import time
+
+log = logging.getLogger("broadcast")
 
 USE_ICECAST = os.getenv("USE_ICECAST", "false").lower() == "true"
+USE_MEDIAMTX = os.getenv("USE_MEDIAMTX", "false").lower() == "true"
+# Mikrofon chunk'lari har ~0.5s kelib turishi kerak (GoLiveButton.tsx).
+# Shuncha vaqt chunk kelmasa — sessiya "osilib qolgan" deb hisoblanadi
+# (masalan foydalanuvchi /stop chaqirmasdan ilovani yopib qo'ygan).
+STALE_TIMEOUT_SEC = 15
 ICECAST_HOST = os.getenv("ICECAST_HOST", "icecast")
 ICECAST_PORT = int(os.getenv("ICECAST_PORT", "8000"))
 ICECAST_PASS = os.getenv("ICECAST_PASS", "IcecastPass2025!")
+MEDIAMTX_HOST = os.getenv("MEDIAMTX_HOST", "mediamtx")
+MEDIAMTX_RTMP_PORT = int(os.getenv("MEDIAMTX_RTMP_PORT", "1935"))
+MEDIAMTX_PUBLISH_PASS = os.getenv("MEDIAMTX_PUBLISH_PASS", "MediaMTXPass2025!")
+
+
+def _target_url(mount: str) -> str:
+    """Chiqish manzili — Icecast yoki MediaMTX (USE_ICECAST ustuvor)."""
+    if USE_ICECAST:
+        return f"icecast://source:{ICECAST_PASS}@{ICECAST_HOST}:{ICECAST_PORT}{mount}"
+    # MediaMTX internal auth RTMP orqali userinfo (user:pass@host) emas,
+    # query-parametr sifatida keladi: ?user=&pass=
+    return f"rtmp://{MEDIAMTX_HOST}:{MEDIAMTX_RTMP_PORT}{mount}?user=publisher&pass={MEDIAMTX_PUBLISH_PASS}"
+
+
+def _encode_args() -> list[str]:
+    """Kodek/konteyner — Icecast uchun MP3, MediaMTX uchun AAC/FLV."""
+    if USE_ICECAST:
+        return [
+            "-c:a", "libmp3lame", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+            "-content_type", "audio/mpeg", "-f", "mp3",
+        ]
+    return [
+        "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+        "-f", "flv",
+    ]
 
 
 def _ffmpeg_bin() -> str:
     """FFmpeg binarini topadi (tizimda yoki imageio-ffmpeg)."""
     from shutil import which
+
     sys_ff = which("ffmpeg")
     if sys_ff:
         return sys_ff
     try:
         import imageio_ffmpeg
+
         return imageio_ffmpeg.get_ffmpeg_exe()
     except Exception:
         return "ffmpeg"
@@ -36,27 +75,46 @@ class BroadcastSession:
         self.city = city
         self.broadcaster_name = broadcaster_name
         self.proc: subprocess.Popen | None = None
+        self.last_activity = time.monotonic()
 
     def start(self) -> None:
         # Jonli efir /live_ru mount'ga uzatiladi (tinglovchilar shu yerni eshitadi)
         mount = "/live_ru"
-        icecast_url = (
-            f"icecast://source:{ICECAST_PASS}@{ICECAST_HOST}:{ICECAST_PORT}{mount}"
-        )
         cmd = [
             _ffmpeg_bin(),
-            "-f", "webm", "-i", "pipe:0",      # stdin'dан webm/opus
-            "-c:a", "libmp3lame", "-b:a", "128k",
-            "-ar", "44100", "-ac", "2",
-            "-content_type", "audio/mpeg",
-            "-f", "mp3", icecast_url,
+            "-hide_banner",
+            # -re: kirishni real vaqt tezligida o'qiydi. Icecast — oddiy bayt
+            # relay (HLS'dan farqli, segment timestamp'lariga qarab qayta
+            # sinxronlamaydi), shu sabab -re bo'lmasa ffmpeg tarmoqdan kelgan
+            # bo'laklarni imkon qadar tez qayta ishlab, oqimni soniyalarда
+            # "tugatib qo'yadi" — tinglovchi hech narsa ulgurmaydi eshitishga.
+            "-re",
+            "-f",
+            "webm",
+            "-i",
+            "pipe:0",  # stdin'dан webm/opus
+            *_encode_args(),
+            _target_url(mount),
         ]
         self.proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
         )
+        # stderr'ni DEVNULL qilib tashlab yubormaymiz — jonli mikrofon
+        # ffmpeg'i real qurilmalarda ba'zan tezda o'lib qoladi (feed failed),
+        # sababini ko'rish uchun fon oqimida log'ga yozamiz.
+        threading.Thread(target=self._log_stderr, daemon=True).start()
+
+    def _log_stderr(self) -> None:
+        proc = self.proc
+        if proc is None or proc.stderr is None:
+            return
+        for line in iter(proc.stderr.readline, b""):
+            text = line.decode(errors="replace").rstrip()
+            if text:
+                log.warning("[broadcast:%s] ffmpeg: %s", self.city, text)
 
     def write(self, chunk: bytes) -> bool:
         """Audio chunk'ni FFmpeg stdin'ga yozadi. Muvaffaqiyat — True."""
@@ -65,9 +123,13 @@ class BroadcastSession:
         try:
             self.proc.stdin.write(chunk)
             self.proc.stdin.flush()
+            self.last_activity = time.monotonic()
             return True
         except (BrokenPipeError, OSError):
             return False
+
+    def is_stale(self) -> bool:
+        return time.monotonic() - self.last_activity > STALE_TIMEOUT_SEC
 
     def stop(self) -> None:
         if self.proc is not None:
@@ -92,16 +154,25 @@ _active: dict[str, BroadcastSession] = {}
 
 
 def is_available() -> bool:
-    """Jonli efir mavjudmi (Icecast yoqilganmi)."""
-    return USE_ICECAST
+    """Jonli efir mavjudmi (Icecast yoki MediaMTX yoqilganmi)."""
+    return USE_ICECAST or USE_MEDIAMTX
+
+
+def _reap_if_stale(city: str) -> None:
+    """Chunk oqimi to'xtab qolgan (klient /stop chaqirmasdan uzilgan) sessiyani tozalaydi."""
+    session = _active.get(city)
+    if session is not None and session.is_stale():
+        close_session(city)
 
 
 def is_busy(city: str) -> bool:
+    _reap_if_stale(city)
     return city in _active
 
 
 def open_session(city: str, broadcaster_name: str) -> BroadcastSession | None:
     """Yangi efir sessiyasini ochadi. Shahar band bo'lsa — None."""
+    _reap_if_stale(city)
     if city in _active:
         return None
     session = BroadcastSession(city, broadcaster_name)
@@ -125,22 +196,16 @@ def close_session(city: str) -> None:
 
 
 def push_file(city: str, mp3_path: str) -> int:
-    """Tayyor mp3 faylni Icecast mountpoint'ga uzatadi (moderator одобрил → efir).
+    """Tayyor mp3 faylni Icecast/MediaMTX mountpoint'ga uzatadi (moderator одобрил → efir).
 
-    Faqat USE_ICECAST=true bo'lganда ishlatiladi. Bloklovchi subprocess —
-    chaqiruvchi tomon to_thread ichidaн chaqirsin yoki dev'da o'tkazib yuborsin.
+    Faqat USE_ICECAST yoki USE_MEDIAMTX yoqilganda ishlatiladi. Bloklovchi
+    subprocess — chaqiruvchi tomon to_thread ichidaн chaqirsin yoki dev'da
+    o'tkazib yuborsin.
     """
-    if not USE_ICECAST:
+    if not (USE_ICECAST or USE_MEDIAMTX):
         return 0
     mount = f"/{city}"
-    icecast_url = (
-        f"icecast://source:{ICECAST_PASS}@{ICECAST_HOST}:{ICECAST_PORT}{mount}"
-    )
-    cmd = [
-        _ffmpeg_bin(), "-re", "-i", mp3_path,
-        "-c:a", "libmp3lame", "-b:a", "128k", "-ar", "44100", "-ac", "2",
-        "-content_type", "audio/mpeg", "-f", "mp3", icecast_url,
-    ]
+    cmd = [_ffmpeg_bin(), "-re", "-i", mp3_path, *_encode_args(), _target_url(mount)]
     proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     return proc.returncode
 
@@ -159,14 +224,7 @@ def mount_for(lang: str) -> str:
 def _push_one(lang: str, mp3_path: str) -> int:
     """Пушит один mp3 в mount /live_{lang} через FFmpeg."""
     mount = mount_for(lang)  # валидация языка
-    icecast_url = (
-        f"icecast://source:{ICECAST_PASS}@{ICECAST_HOST}:{ICECAST_PORT}{mount}"
-    )
-    cmd = [
-        _ffmpeg_bin(), "-re", "-i", mp3_path,
-        "-c:a", "libmp3lame", "-b:a", "128k", "-ar", "44100", "-ac", "2",
-        "-content_type", "audio/mpeg", "-f", "mp3", icecast_url,
-    ]
+    cmd = [_ffmpeg_bin(), "-re", "-i", mp3_path, *_encode_args(), _target_url(mount)]
     proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     return proc.returncode
 
@@ -177,7 +235,7 @@ def push_files_multilang(paths: dict[str, str]) -> dict[str, int]:
     Изоляция сбоев: код != 0 у одного языка не затрагивает остальные (Req 11.4).
     Returns: {lang: returncode}.
     """
-    if not USE_ICECAST:
+    if not (USE_ICECAST or USE_MEDIAMTX):
         return {}
     results: dict[str, int] = {}
     for lang, mp3 in paths.items():

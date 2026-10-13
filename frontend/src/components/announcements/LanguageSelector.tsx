@@ -20,8 +20,8 @@ export function LanguageSelector({ selectedLang, onLangChange }: LanguageSelecto
     <div className="glass p-4 rounded-2xl">
       {/* Label */}
       <div className="flex items-center gap-2 mb-3">
-        <Globe className="w-3.5 h-3.5 text-[#6b7c9e]" strokeWidth={2} />
-        <span className="text-[10px] font-medium text-[#6b7c9e] uppercase tracking-wide">
+        <Globe className="w-3.5 h-3.5 text-[var(--muted)]" strokeWidth={2} />
+        <span className="text-[10px] font-medium text-[var(--muted)] uppercase tracking-wide">
           {t('anons_lang_hint')}
         </span>
       </div>
@@ -42,15 +42,15 @@ export function LanguageSelector({ selectedLang, onLangChange }: LanguageSelecto
                 overflow-hidden
                 ${
                   isActive
-                    ? 'text-[#060a14] scale-[1.03]'
-                    : 'bg-[rgba(255,255,255,0.03)] text-[#8b9bb3] border border-[rgba(255,255,255,0.06)] hover:bg-[rgba(255,255,255,0.06)] hover:text-[#dbe9ff] hover:scale-[1.01]'
+                    ? 'text-[#050505] scale-[1.03]'
+                    : 'bg-[rgba(255,255,255,0.03)] text-[var(--muted)] border border-[rgba(255,255,255,0.06)] hover:bg-[rgba(255,255,255,0.06)] hover:text-[var(--text)] hover:scale-[1.01]'
                 }
               `}
               style={
                 isActive
                   ? {
-                      background: 'linear-gradient(135deg, #2ea8ff, #38e1ff)',
-                      boxShadow: '0 0 20px rgba(56,225,255,0.35), 0 4px 12px rgba(46,168,255,0.2)',
+                      background: 'linear-gradient(135deg, #5ffbe0, #00F0C0)',
+                      boxShadow: '0 0 20px rgba(0,240,192,0.35), 0 4px 12px rgba(251,146,60,0.2)',
                     }
                   : {}
               }

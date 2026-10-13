@@ -1,29 +1,32 @@
 import { useRef, useEffect } from 'react';
 import { ChatMessage as ChatMessageComponent } from './ChatMessage';
 import { ChatInput } from './ChatInput';
-import { useTranslation } from '../../hooks/useTranslation';
-import type { ChatMessage as ChatMessageType, User, Language } from '../../types';
+import { RoomsButton } from './RoomsScreen';
+import type { ChatMessage as ChatMessageType, User } from '../../types';
 
 interface ChatProps {
   messages: ChatMessageType[];
   currentUser: User | null;
   onSendMessage: (message: string, destination: 'chat' | 'studio') => void;
+  onSendVoice: (blob: Blob) => void;
   onToast: (message: string) => void;
   city: string;
-  language: Language;
-  onPointsUpdate: (points: number) => void;
+  // Berilsa — sarlavha yonida chiqish tugmasi ko'rsatiladi (asosiy "Живой
+  // чат" ekranida BottomNav o'rniga shu orqali oldingi ekranga qaytiladi).
+  onExit?: () => void;
+  isLive?: boolean;
 }
 
 export function Chat({
   messages,
   currentUser,
   onSendMessage,
+  onSendVoice,
   onToast,
   city,
-  language,
-  onPointsUpdate,
+  onExit,
+  isLive,
 }: ChatProps) {
-  const { t } = useTranslation();
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -35,9 +38,32 @@ export function Chat({
   };
 
   return (
-    <div className="glass p-3 flex flex-col flex-1 min-h-0">
-      <div className="flex justify-between items-center text-[11px] tracking-[2px] mb-3">
-        <span className="text-[#38e1ff]">{t('chat_title')}</span>
+    <div className="rift-zone-u2 bg-[var(--bg)] p-3 flex flex-col flex-1 min-h-0">
+      {/* Sarlavhasiz, chegarasiz — Efir'dagi "ЧАЙ СВЕРХМОЩНОСТЬ" bilan bir
+          xil toza ko'rinish uchun. Faqat funksional tugmalar (chiqish,
+          guruhlar) qoladi, matn/border yo'q. Yuqoridan qo'shimcha bo'sh joy
+          (safe-area + o'zi) — Telegram'ning o'z "⋮ ⌄ ✕" native paneli aynan
+          shu burchakda bo'lgani uchun, tugmalar shu bilan to'qnashmasin. */}
+      <div
+        className="flex items-center justify-between mb-2"
+        style={{ paddingTop: 'calc(76px + env(safe-area-inset-top))' }}
+      >
+        <div className="flex items-center gap-2">
+          <span className="rift-sticker text-[10px]" style={{ '--sticker-rot': '-3deg' } as any}>ЧАТ</span>
+          {onExit && (
+            <button
+              onClick={onExit}
+              aria-label="Выйти из чата"
+              className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0"
+              style={{ background: 'rgba(237,234,227,0.1)' }}
+            >
+              <svg className="w-4 h-4 text-[var(--text)]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
+              </svg>
+            </button>
+          )}
+        </div>
+        <RoomsButton user={currentUser} isLive={isLive} />
       </div>
 
       <div className="flex-1 overflow-y-auto flex flex-col gap-2 pr-1 min-h-[60px] scroll-smooth"
@@ -54,10 +80,10 @@ export function Chat({
 
       <ChatInput
         onSendMessage={onSendMessage}
+        onSendVoice={onSendVoice}
         onToast={onToast}
         city={city}
-        language={language}
-        onPointsUpdate={onPointsUpdate}
+        micDisabled={isLive}
       />
     </div>
   );
